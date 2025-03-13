@@ -5,8 +5,8 @@ Pillow
 numpy
 transformers
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
+torch==2.2.1+cpu
+torchvision==0.17.1+cpu
 anthropic
 openai-whisper
 python-dotenv
@@ -19,3 +19,4 @@ reportlab
 pdfkit
 scikit-learn
 soundfile
+nest-asyncio>=1.5.8
