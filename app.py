@@ -4,7 +4,7 @@ import cv2
 import os
 from PIL import Image
 import numpy as np
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoFeatureExtractor, AutoModel
 from transformers.pipelines import pipeline
 import torch
 import tempfile
@@ -29,7 +29,6 @@ import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
 import asyncio
-import nest_asyncio
 
 try:
     import pdfkit
@@ -80,9 +79,7 @@ def load_models():
     try:
         image_captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-large")
         
-        model_name = "google/vit-base-patch16-224"
-        feature_extractor = AutoImageProcessor.from_pretrained(model_name)
-        model = AutoModel.from_pretrained(model_name)
+        feature_extractor, model = initialize_model()
         
         def extract_features(image):
             inputs = feature_extractor(images=image, return_tensors="pt")
@@ -99,6 +96,19 @@ def load_models():
     except Exception as e:
         st.error(f"Error loading models: {str(e)}")
         return None, None, None
+
+def initialize_model():
+    try:
+        # Initialize the model and processor with explicit fast processing
+        feature_extractor = AutoFeatureExtractor.from_pretrained(
+            "google/vit-base-patch16-224",
+            use_fast=True
+        )
+        model = AutoModel.from_pretrained("google/vit-base-patch16-224")
+        return feature_extractor, model
+    except Exception as e:
+        st.error(f"Error initializing model: {str(e)}")
+        return None, None
 
 def get_image_hash(image):
     """Generate perceptual hash of image for deduplication"""
@@ -668,105 +678,99 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video using enhanced methods from phase.py"""
-    print(f"Downloading video from YouTube: {url}")
+    """Download YouTube video using enhanced error handling"""
+    print(f"Attempting to download video: {url}")
+    
+    # Create temp directory if it doesn't exist
+    os.makedirs("temp", exist_ok=True)
+    
     try:
-        # First try to get video info
-        info_cmd = [
-            "yt-dlp",
-            "--dump-json",
-            "--no-playlist",
-            url
-        ]
-        
-        try:
-            result = subprocess.run(info_cmd, capture_output=True, text=True, check=True)
-            video_info = json.loads(result.stdout)
-            video_title = video_info.get('title', '')
-            print(f"Video title: {video_title}")
-        except Exception as e:
-            print(f"Warning: Could not get video info: {str(e)}")
-            video_title = "video"
-
-        # Prepare output path
-        output_path = os.path.join("temp", f"{video_title}.mp4")
-        output_path = re.sub(r'[<>:"/\\|?*]', '_', output_path)  # Clean filename
-
-        # Try multiple download configurations
-        download_configs = [
-            # Config 1: Best video with height limit
-            {
-                "format": "best[height<=720]",
-                "outtmpl": output_path,
-                "quiet": True,
-                "no_warnings": True,
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
-                },
-                "nocheckcertificate": True,
-                "ignoreerrors": True
+        # Configure yt-dlp options
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': 'temp/%(title)s.%(ext)s',
+            'quiet': False,
+            'no_warnings': False,
+            'extract_audio': True,
+            'audio_format': 'mp3',
+            'nocheckcertificate': True,
+            'ignoreerrors': True,
+            'no_color': True,
+            'noprogress': False,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
             },
-            # Config 2: Lower quality fallback
-            {
-                "format": "worst[height>=360]",
-                "outtmpl": output_path,
-                "quiet": True,
-                "no_warnings": True,
-                "nocheckcertificate": True
-            },
-            # Config 3: Minimal configuration
-            {
-                "format": "worst",
-                "outtmpl": output_path,
-                "quiet": True,
-                "nocheckcertificate": True
-            }
-        ]
+            'socket_timeout': 30,
+            'retries': 10,
+        }
 
-        last_error = None
-        for config in download_configs:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                print(f"Trying download with format: {config['format']}")
-                with yt_dlp.YoutubeDL(config) as ydl:
-                    # First verify the video is accessible
-                    info = ydl.extract_info(url, download=False)
-                    if info:
-                        # If verification successful, download
-                        ydl.download([url])
-                        if os.path.exists(output_path):
-                            print(f"Successfully downloaded video to: {output_path}")
-                            return output_path
+                # First try to extract info
+                print("Extracting video information...")
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise Exception("Could not extract video information")
+
+                video_title = info.get('title', 'video')
+                safe_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
+                output_path = os.path.join("temp", f"{safe_title}.mp3")
+
+                print(f"Downloading video: {video_title}")
+                ydl.download([url])
+
+                # Check if file exists
+                if os.path.exists(output_path):
+                    print(f"Successfully downloaded to: {output_path}")
+                    return output_path
+                
+                # Try alternative paths
+                potential_paths = [
+                    os.path.join("temp", f"{safe_title}.mp3"),
+                    os.path.join("temp", f"{safe_title}.m4a"),
+                    os.path.join("temp", f"{safe_title}.webm")
+                ]
+                
+                for path in potential_paths:
+                    if os.path.exists(path):
+                        print(f"Found downloaded file at: {path}")
+                        return path
+
             except Exception as e:
-                last_error = str(e)
-                print(f"Download attempt failed: {str(e)}")
-                continue
+                print(f"Initial download attempt failed: {str(e)}")
+                
+                # Fallback to direct download using subprocess
+                try:
+                    print("Attempting fallback download method...")
+                    output_path = os.path.join("temp", f"{safe_title}.mp3")
+                    command = [
+                        "yt-dlp",
+                        "-x",  # Extract audio
+                        "--audio-format", "mp3",
+                        "-o", output_path,
+                        "--no-playlist",
+                        "--no-check-certificate",
+                        url
+                    ]
+                    
+                    subprocess.run(command, check=True, capture_output=True, text=True)
+                    
+                    if os.path.exists(output_path):
+                        print(f"Fallback download successful: {output_path}")
+                        return output_path
+                    
+                except subprocess.CalledProcessError as sub_e:
+                    print(f"Fallback download failed: {str(sub_e)}")
+                    if hasattr(sub_e, 'stdout'):
+                        print(f"Output: {sub_e.stdout}")
+                    if hasattr(sub_e, 'stderr'):
+                        print(f"Error: {sub_e.stderr}")
+                    raise Exception(f"Both download methods failed: {str(e)} and {str(sub_e)}")
 
-        # If all configs fail, try the method from phase.py
-        try:
-            print("Attempting alternative download method...")
-            os.makedirs("temp", exist_ok=True)
-            download_cmd = [
-                "yt-dlp",
-                "-f", "bestaudio/best",  # Try audio if video fails
-                "-o", output_path,
-                "--no-playlist",
-                "--extract-audio",  # This will extract audio if video download fails
-                "--audio-format", "mp3",
-                url
-            ]
-            
-            subprocess.run(download_cmd, check=True)
-            
-            if os.path.exists(output_path):
-                print(f"Successfully downloaded using alternative method: {output_path}")
-                return output_path
-        except Exception as e:
-            last_error = str(e)
-            print(f"Alternative download method failed: {str(e)}")
-
-        raise Exception(f"All download attempts failed. Last error: {last_error}")
+        raise Exception("Could not download video with any method")
 
     except Exception as e:
         print(f"Error downloading video: {str(e)}")
@@ -1247,12 +1251,6 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
-    try:
-        nest_asyncio.apply()
-    except Exception:
-        pass
-
-    # Ensure we have an event loop
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
