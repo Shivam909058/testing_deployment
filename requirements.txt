@@ -1,12 +1,12 @@
 numpy<2.0.0
-streamlit>=1.32.0
-yt-dlp>=2024.3.10
+streamlit
+yt-dlp==2024.3.10
 opencv-python-headless
 Pillow
-transformers>=4.36.2
+transformers==4.36.2
 torch==2.2.1+cpu
 torchvision==0.17.1+cpu
-anthropic>=0.18.0
+anthropic
 openai-whisper
 python-dotenv
 beautifulsoup4
@@ -16,7 +16,7 @@ weasyprint
 playwright
 reportlab
 pdfkit
-scikit-learn<1.4.0
+scikit-learn
 soundfile
 nest-asyncio
 ffmpeg-python>=0.2.0
