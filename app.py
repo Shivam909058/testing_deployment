@@ -28,6 +28,8 @@ import subprocess
 import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
+import asyncio
+import nest_asyncio
 
 try:
     import pdfkit
@@ -666,7 +668,7 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video with improved error handling and user agent configuration"""
+    """Download YouTube video with simplified configuration"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]',
@@ -678,17 +680,13 @@ def download_youtube_video(url):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
             },
-            # Add cookies handling
-            'cookiesfrombrowser': ('chrome',),  # Use cookies from Chrome
+            # Remove cookies handling
+            'cookiesfrombrowser': None,
             # Add retries
             'retries': 3,
             'fragment_retries': 3,
             'skip_unavailable_fragments': True,
-            # Add rate limiting
-            'sleep_interval': 1,
-            'max_sleep_interval': 5,
             # Add network settings
             'socket_timeout': 30,
             'nocheckcertificate': True,
@@ -697,17 +695,8 @@ def download_youtube_video(url):
         st.info("Attempting to download video...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                # First try to extract info without downloading
-                info = ydl.extract_info(url, download=False)
-                if not info:
-                    raise Exception("Could not extract video information")
-                
-                # Check if video is available
-                if info.get('is_live', False):
-                    raise Exception("Live streams are not supported")
-                
-                # Now download the video
-                st.info(f"Downloading video: {info.get('title', 'Unknown title')}")
+                # Try downloading directly without extracting info first
+                st.info("Downloading video...")
                 info = ydl.extract_info(url, download=True)
                 video_path = ydl.prepare_filename(info)
                 
@@ -720,6 +709,15 @@ def download_youtube_video(url):
             except yt_dlp.utils.DownloadError as e:
                 if "HTTP Error 403" in str(e):
                     st.error("Access forbidden. This might be due to region restrictions or video privacy settings.")
+                    # Try with lower quality
+                    st.info("Trying with lower quality...")
+                    ydl_opts['format'] = 'best[height<=480]'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        info = ydl2.extract_info(url, download=True)
+                        video_path = ydl2.prepare_filename(info)
+                        if os.path.exists(video_path):
+                            st.success("Video downloaded successfully with lower quality")
+                            return video_path
                     raise Exception("Video is not accessible: Region restricted or private")
                 elif "Video unavailable" in str(e):
                     st.error("Video is unavailable. It might have been removed or set to private.")
@@ -729,11 +727,16 @@ def download_youtube_video(url):
                     
     except Exception as e:
         st.error(f"Error downloading video: {str(e)}")
-        # Try alternative download method if first one fails
+        # Try alternative download method with basic format
         try:
             st.info("Trying alternative download method...")
-            ydl_opts['format'] = 'best[height<=480]'  # Try lower quality
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            basic_opts = {
+                'format': 'worst',  # Try lowest quality
+                'outtmpl': 'temp_video.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(basic_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_path = ydl.prepare_filename(info)
                 if os.path.exists(video_path):
@@ -1217,4 +1220,16 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
+    try:
+        nest_asyncio.apply()
+    except Exception:
+        pass
+
+    # Ensure we have an event loop
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     main()
