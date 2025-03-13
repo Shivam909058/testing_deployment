@@ -4,8 +4,9 @@ yt-dlp==2024.3.10
 opencv-python-headless
 Pillow
 transformers==4.36.2
-torch==2.2.1+cpu
-torchvision==0.17.1+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2.0
+torchvision>=0.17.0
 anthropic
 openai-whisper
 python-dotenv
@@ -16,8 +17,7 @@ weasyprint
 playwright
 reportlab
 pdfkit
-scikit-learn
+scikit-learn<1.4.0
 soundfile
-nest-asyncio
-ffmpeg-python>=0.2.0
-numpy
+ffmpeg-python
+rich>=10.14.0
