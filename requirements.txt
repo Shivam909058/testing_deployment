@@ -1,6 +1,6 @@
 numpy<2.0.0
 streamlit
-yt-dlp
+yt-dlp>=2024.3.10
 opencv-python-headless
 Pillow
 transformers>=4.30.0

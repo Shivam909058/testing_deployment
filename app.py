@@ -668,82 +668,98 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video with simplified configuration"""
+    """Download YouTube video with enhanced error handling and bypass restrictions"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]',
             'outtmpl': 'temp_video.%(ext)s',
             'quiet': True,
             'no_warnings': True,
-            # Add user agent and other HTTP headers
+            # Enhanced user agent and headers
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
             },
-            # Remove cookies handling
-            'cookiesfrombrowser': None,
-            # Add retries
-            'retries': 3,
-            'fragment_retries': 3,
-            'skip_unavailable_fragments': True,
-            # Add network settings
-            'socket_timeout': 30,
+            # Additional options to bypass restrictions
             'nocheckcertificate': True,
+            'ignoreerrors': True,
+            'no_color': True,
+            'noprogress': True,
+            'allow_unplayable_formats': True,
+            'extractor_retries': 5,
+            'file_access_retries': 5,
+            'fragment_retries': 5,
+            'skip_unavailable_fragments': True,
+            'retry_sleep_functions': {'http': lambda n: 5},
+            'socket_timeout': 30,
         }
         
         st.info("Attempting to download video...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        
+        # Try different format combinations
+        format_options = [
+            'best[height<=720]',
+            'best[height<=480]',
+            'worst[height>=360]',
+            'worstvideo[height>=240]+bestaudio/worst',
+            'worst'
+        ]
+        
+        for format_option in format_options:
             try:
-                # Try downloading directly without extracting info first
-                st.info("Downloading video...")
-                info = ydl.extract_info(url, download=True)
-                video_path = ydl.prepare_filename(info)
+                ydl_opts['format'] = format_option
+                st.info(f"Trying format: {format_option}")
                 
-                if not os.path.exists(video_path):
-                    raise Exception("Video file was not created")
-                
-                st.success("Video downloaded successfully")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # First try to extract info
+                    try:
+                        info = ydl.extract_info(url, download=False)
+                        if info:
+                            # If info extraction successful, try downloading
+                            info = ydl.extract_info(url, download=True)
+                            video_path = ydl.prepare_filename(info)
+                            
+                            if os.path.exists(video_path):
+                                st.success(f"Video downloaded successfully using format: {format_option}")
+                                return video_path
+                    except Exception as e:
+                        st.warning(f"Format {format_option} failed: {str(e)}")
+                        continue
+            
+            except Exception as e:
+                continue
+        
+        # If all format options fail, try with minimal options
+        st.info("Trying with minimal options...")
+        minimal_opts = {
+            'format': 'worst',
+            'outtmpl': 'temp_video.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'ignoreerrors': True,
+        }
+        
+        with yt_dlp.YoutubeDL(minimal_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            if os.path.exists(video_path):
+                st.success("Video downloaded successfully with minimal options")
                 return video_path
-                
-            except yt_dlp.utils.DownloadError as e:
-                if "HTTP Error 403" in str(e):
-                    st.error("Access forbidden. This might be due to region restrictions or video privacy settings.")
-                    # Try with lower quality
-                    st.info("Trying with lower quality...")
-                    ydl_opts['format'] = 'best[height<=480]'
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                        info = ydl2.extract_info(url, download=True)
-                        video_path = ydl2.prepare_filename(info)
-                        if os.path.exists(video_path):
-                            st.success("Video downloaded successfully with lower quality")
-                            return video_path
-                    raise Exception("Video is not accessible: Region restricted or private")
-                elif "Video unavailable" in str(e):
-                    st.error("Video is unavailable. It might have been removed or set to private.")
-                    raise Exception("Video is unavailable")
-                else:
-                    raise Exception(f"Download error: {str(e)}")
-                    
+        
+        raise Exception("All download attempts failed")
+        
     except Exception as e:
         st.error(f"Error downloading video: {str(e)}")
-        # Try alternative download method with basic format
-        try:
-            st.info("Trying alternative download method...")
-            basic_opts = {
-                'format': 'worst',  # Try lowest quality
-                'outtmpl': 'temp_video.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-            }
-            with yt_dlp.YoutubeDL(basic_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                video_path = ydl.prepare_filename(info)
-                if os.path.exists(video_path):
-                    st.success("Video downloaded successfully with alternative method")
-                    return video_path
-        except Exception as alt_e:
-            raise Exception(f"Failed to download video: {str(e)}. Alternative method also failed: {str(alt_e)}")
+        raise Exception(f"Failed to download video: {str(e)}")
 
 def extract_frames(video_path, interval=5):
     """Extract frames from video at given interval (seconds)"""
