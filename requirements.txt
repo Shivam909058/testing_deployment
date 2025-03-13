@@ -21,4 +21,4 @@ scikit-learn<1.4.0
 soundfile
 nest-asyncio
 ffmpeg
-
+numpy
