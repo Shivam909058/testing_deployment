@@ -678,16 +678,16 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video using enhanced error handling"""
+    """Download YouTube video using enhanced error handling and multiple fallback methods"""
     print(f"Attempting to download video: {url}")
     
     # Create temp directory if it doesn't exist
     os.makedirs("temp", exist_ok=True)
     
     try:
-        # Configure yt-dlp options
+        # Configure yt-dlp options with more robust settings
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': 'temp/%(title)s.%(ext)s',
             'quiet': False,
             'no_warnings': False,
@@ -698,79 +698,94 @@ def download_youtube_video(url):
             'no_color': True,
             'noprogress': False,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
             },
             'socket_timeout': 30,
             'retries': 10,
+            'external_downloader': 'ffmpeg',
+            'external_downloader_args': ['-timeout', '30'],
+            'concurrent_fragment_downloads': 1
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Try multiple download methods
+        methods = [
+            # Method 1: Direct audio download
+            {**ydl_opts, 'format': 'bestaudio[ext=m4a]/bestaudio/best'},
+            # Method 2: Best video with audio
+            {**ydl_opts, 'format': 'best[height<=720]'},
+            # Method 3: Worst video with audio
+            {**ydl_opts, 'format': 'worst'},
+            # Method 4: Audio only with different format
+            {**ydl_opts, 'format': 'worstaudio/worst'}
+        ]
+
+        last_error = None
+        for method_opts in methods:
             try:
-                # First try to extract info
-                print("Extracting video information...")
-                info = ydl.extract_info(url, download=False)
-                if not info:
-                    raise Exception("Could not extract video information")
+                with yt_dlp.YoutubeDL(method_opts) as ydl:
+                    print(f"Trying download with format: {method_opts['format']}")
+                    
+                    # Extract info first
+                    info = ydl.extract_info(url, download=False)
+                    if not info:
+                        continue
 
-                video_title = info.get('title', 'video')
-                safe_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
-                output_path = os.path.join("temp", f"{safe_title}.mp3")
-
-                print(f"Downloading video: {video_title}")
-                ydl.download([url])
-
-                # Check if file exists
-                if os.path.exists(output_path):
-                    print(f"Successfully downloaded to: {output_path}")
-                    return output_path
-                
-                # Try alternative paths
-                potential_paths = [
-                    os.path.join("temp", f"{safe_title}.mp3"),
-                    os.path.join("temp", f"{safe_title}.m4a"),
-                    os.path.join("temp", f"{safe_title}.webm")
-                ]
-                
-                for path in potential_paths:
-                    if os.path.exists(path):
-                        print(f"Found downloaded file at: {path}")
-                        return path
-
-            except Exception as e:
-                print(f"Initial download attempt failed: {str(e)}")
-                
-                # Fallback to direct download using subprocess
-                try:
-                    print("Attempting fallback download method...")
-                    output_path = os.path.join("temp", f"{safe_title}.mp3")
-                    command = [
-                        "yt-dlp",
-                        "-x",  # Extract audio
-                        "--audio-format", "mp3",
-                        "-o", output_path,
-                        "--no-playlist",
-                        "--no-check-certificate",
-                        url
+                    video_title = info.get('title', 'video')
+                    safe_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
+                    
+                    # Try download
+                    ydl.download([url])
+                    
+                    # Check multiple possible output paths
+                    potential_paths = [
+                        os.path.join("temp", f"{safe_title}.mp3"),
+                        os.path.join("temp", f"{safe_title}.m4a"),
+                        os.path.join("temp", f"{safe_title}.webm"),
+                        os.path.join("temp", f"{safe_title}.mp4")
                     ]
                     
-                    subprocess.run(command, check=True, capture_output=True, text=True)
-                    
-                    if os.path.exists(output_path):
-                        print(f"Fallback download successful: {output_path}")
-                        return output_path
-                    
-                except subprocess.CalledProcessError as sub_e:
-                    print(f"Fallback download failed: {str(sub_e)}")
-                    if hasattr(sub_e, 'stdout'):
-                        print(f"Output: {sub_e.stdout}")
-                    if hasattr(sub_e, 'stderr'):
-                        print(f"Error: {sub_e.stderr}")
-                    raise Exception(f"Both download methods failed: {str(e)} and {str(sub_e)}")
+                    for path in potential_paths:
+                        if os.path.exists(path):
+                            print(f"Successfully downloaded to: {path}")
+                            return path
+                            
+            except Exception as e:
+                print(f"Download attempt failed: {str(e)}")
+                last_error = e
+                continue
 
-        raise Exception("Could not download video with any method")
+        # Final fallback: Try direct ffmpeg download
+        try:
+            print("Attempting ffmpeg direct download...")
+            output_path = os.path.join("temp", f"video_fallback.mp3")
+            command = [
+                "ffmpeg", "-y",
+                "-http_persistent", "0",
+                "-timeout", "30",
+                "-i", url,
+                "-vn",  # No video
+                "-acodec", "libmp3lame",
+                "-ar", "44100",
+                "-ab", "192k",
+                "-f", "mp3",
+                output_path
+            ]
+            
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            
+            if os.path.exists(output_path):
+                return output_path
+                
+        except Exception as ffmpeg_error:
+            print(f"FFmpeg fallback failed: {str(ffmpeg_error)}")
+            last_error = ffmpeg_error
+
+        raise Exception(f"All download methods failed. Last error: {str(last_error)}")
 
     except Exception as e:
         print(f"Error downloading video: {str(e)}")
@@ -1251,10 +1266,22 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
+    # Set up event loop
+    if os.name == 'nt':  # Windows
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-    main()
+    
+    # Run the main application
+    try:
+        main()
+    finally:
+        # Clean up the event loop
+        try:
+            loop.close()
+        except:
+            pass
