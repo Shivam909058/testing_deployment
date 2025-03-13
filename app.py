@@ -668,97 +668,108 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video with enhanced error handling and bypass restrictions"""
+    """Download YouTube video using enhanced methods from phase.py"""
+    print(f"Downloading video from YouTube: {url}")
     try:
-        ydl_opts = {
-            'format': 'best[height<=720]',
-            'outtmpl': 'temp_video.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            # Enhanced user agent and headers
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-            },
-            # Additional options to bypass restrictions
-            'nocheckcertificate': True,
-            'ignoreerrors': True,
-            'no_color': True,
-            'noprogress': True,
-            'allow_unplayable_formats': True,
-            'extractor_retries': 5,
-            'file_access_retries': 5,
-            'fragment_retries': 5,
-            'skip_unavailable_fragments': True,
-            'retry_sleep_functions': {'http': lambda n: 5},
-            'socket_timeout': 30,
-        }
-        
-        st.info("Attempting to download video...")
-        
-        # Try different format combinations
-        format_options = [
-            'best[height<=720]',
-            'best[height<=480]',
-            'worst[height>=360]',
-            'worstvideo[height>=240]+bestaudio/worst',
-            'worst'
+        # First try to get video info
+        info_cmd = [
+            "yt-dlp",
+            "--dump-json",
+            "--no-playlist",
+            url
         ]
         
-        for format_option in format_options:
+        try:
+            result = subprocess.run(info_cmd, capture_output=True, text=True, check=True)
+            video_info = json.loads(result.stdout)
+            video_title = video_info.get('title', '')
+            print(f"Video title: {video_title}")
+        except Exception as e:
+            print(f"Warning: Could not get video info: {str(e)}")
+            video_title = "video"
+
+        # Prepare output path
+        output_path = os.path.join("temp", f"{video_title}.mp4")
+        output_path = re.sub(r'[<>:"/\\|?*]', '_', output_path)  # Clean filename
+
+        # Try multiple download configurations
+        download_configs = [
+            # Config 1: Best video with height limit
+            {
+                "format": "best[height<=720]",
+                "outtmpl": output_path,
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                },
+                "nocheckcertificate": True,
+                "ignoreerrors": True
+            },
+            # Config 2: Lower quality fallback
+            {
+                "format": "worst[height>=360]",
+                "outtmpl": output_path,
+                "quiet": True,
+                "no_warnings": True,
+                "nocheckcertificate": True
+            },
+            # Config 3: Minimal configuration
+            {
+                "format": "worst",
+                "outtmpl": output_path,
+                "quiet": True,
+                "nocheckcertificate": True
+            }
+        ]
+
+        last_error = None
+        for config in download_configs:
             try:
-                ydl_opts['format'] = format_option
-                st.info(f"Trying format: {format_option}")
-                
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # First try to extract info
-                    try:
-                        info = ydl.extract_info(url, download=False)
-                        if info:
-                            # If info extraction successful, try downloading
-                            info = ydl.extract_info(url, download=True)
-                            video_path = ydl.prepare_filename(info)
-                            
-                            if os.path.exists(video_path):
-                                st.success(f"Video downloaded successfully using format: {format_option}")
-                                return video_path
-                    except Exception as e:
-                        st.warning(f"Format {format_option} failed: {str(e)}")
-                        continue
-            
+                print(f"Trying download with format: {config['format']}")
+                with yt_dlp.YoutubeDL(config) as ydl:
+                    # First verify the video is accessible
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        # If verification successful, download
+                        ydl.download([url])
+                        if os.path.exists(output_path):
+                            print(f"Successfully downloaded video to: {output_path}")
+                            return output_path
             except Exception as e:
+                last_error = str(e)
+                print(f"Download attempt failed: {str(e)}")
                 continue
-        
-        # If all format options fail, try with minimal options
-        st.info("Trying with minimal options...")
-        minimal_opts = {
-            'format': 'worst',
-            'outtmpl': 'temp_video.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'ignoreerrors': True,
-        }
-        
-        with yt_dlp.YoutubeDL(minimal_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_path = ydl.prepare_filename(info)
-            if os.path.exists(video_path):
-                st.success("Video downloaded successfully with minimal options")
-                return video_path
-        
-        raise Exception("All download attempts failed")
-        
+
+        # If all configs fail, try the method from phase.py
+        try:
+            print("Attempting alternative download method...")
+            os.makedirs("temp", exist_ok=True)
+            download_cmd = [
+                "yt-dlp",
+                "-f", "bestaudio/best",  # Try audio if video fails
+                "-o", output_path,
+                "--no-playlist",
+                "--extract-audio",  # This will extract audio if video download fails
+                "--audio-format", "mp3",
+                url
+            ]
+            
+            subprocess.run(download_cmd, check=True)
+            
+            if os.path.exists(output_path):
+                print(f"Successfully downloaded using alternative method: {output_path}")
+                return output_path
+        except Exception as e:
+            last_error = str(e)
+            print(f"Alternative download method failed: {str(e)}")
+
+        raise Exception(f"All download attempts failed. Last error: {last_error}")
+
     except Exception as e:
-        st.error(f"Error downloading video: {str(e)}")
+        print(f"Error downloading video: {str(e)}")
         raise Exception(f"Failed to download video: {str(e)}")
 
 def extract_frames(video_path, interval=5):
