@@ -4,7 +4,7 @@ import cv2
 import os
 from PIL import Image
 import numpy as np
-from transformers import AutoFeatureExtractor, AutoModel
+from transformers import AutoImageProcessor, AutoModel
 from transformers.pipelines import pipeline
 import torch
 import tempfile
@@ -81,8 +81,7 @@ def load_models():
         image_captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-large")
         
         model_name = "google/vit-base-patch16-224"
-        from transformers import ViTImageProcessor
-        feature_extractor = ViTImageProcessor.from_pretrained(model_name, use_fast=True)
+        feature_extractor = AutoImageProcessor.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)
         
         def extract_features(image):
