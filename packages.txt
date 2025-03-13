@@ -5,3 +5,4 @@ libxext6
 libxrender1
 libxrender-dev
 ffmpeg
+python3-dev

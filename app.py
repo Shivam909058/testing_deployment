@@ -29,6 +29,14 @@ import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
 import asyncio
+import nest_asyncio
+import sys
+
+if sys.version_info[0] == 3 and sys.version_info[1] >= 12:
+    class PathFix:
+        def __init__(self):
+            self._path = []
+    sys.modules['torch'].__path__ = PathFix()
 
 try:
     import pdfkit
@@ -678,108 +686,48 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video using enhanced error handling and SSL verification bypass"""
-    print(f"Attempting to download video: {url}")
-    
-    # Create temp directory if it doesn't exist
-    os.makedirs("temp", exist_ok=True)
+    """Download YouTube video with enhanced error handling for Streamlit"""
+    temp_dir = "temp"
+    os.makedirs(temp_dir, exist_ok=True)
     
     try:
-        # Configure yt-dlp options with SSL verification disabled
+        import yt_dlp
+        
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
-            'outtmpl': 'temp/%(title)s.%(ext)s',
-            'quiet': False,
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'nocheckcertificate': True,
+            'ignoreerrors': True,
             'no_warnings': False,
+            'quiet': False,
             'extract_audio': True,
             'audio_format': 'mp3',
-            'nocheckcertificate': True,  # Disable SSL verification
-            'ignoreerrors': True,
-            'no_color': True,
-            'noprogress': False,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-            },
-            'socket_timeout': 30,
-            'retries': 10,
+            }
         }
-
-        # Try using pytube as first attempt
-        try:
-            from pytube import YouTube
-            print("Attempting download with pytube...")
-            yt = YouTube(url)
-            stream = yt.streams.filter(only_audio=True).first()
-            output_path = stream.download(output_path="temp")
-            print(f"Successfully downloaded with pytube to: {output_path}")
-            return output_path
-        except Exception as pytube_error:
-            print(f"Pytube download failed: {str(pytube_error)}")
-
-        # Try yt-dlp with different methods
-        try:
+        
+        with st.spinner('Downloading video...'):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                print("Attempting download with yt-dlp...")
                 info = ydl.extract_info(url, download=True)
                 if info:
                     filename = ydl.prepare_filename(info)
-                    # Handle potential filename extension changes
-                    possible_extensions = ['.mp3', '.m4a', '.webm', '.mp4']
-                    for ext in possible_extensions:
-                        potential_file = os.path.splitext(filename)[0] + ext
-                        if os.path.exists(potential_file):
-                            print(f"Successfully downloaded to: {potential_file}")
-                            return potential_file
-        except Exception as ytdlp_error:
-            print(f"yt-dlp download failed: {str(ytdlp_error)}")
-
-        # Try using youtube-dl as fallback
-        try:
-            import youtube_dl
-            print("Attempting download with youtube-dl...")
-            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info:
-                    filename = ydl.prepare_filename(info)
-                    if os.path.exists(filename):
-                        print(f"Successfully downloaded with youtube-dl to: {filename}")
-                        return filename
-        except Exception as ytdl_error:
-            print(f"youtube-dl download failed: {str(ytdl_error)}")
-
-        # Final attempt using requests to download directly
-        try:
-            print("Attempting direct download...")
-            import requests
-            # Disable SSL verification for requests
-            session = requests.Session()
-            session.verify = False
-            
-            # Suppress SSL warnings
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            response = session.get(url, stream=True)
-            output_path = os.path.join("temp", "direct_download.mp4")
-            
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                print(f"Successfully downloaded directly to: {output_path}")
-                return output_path
-        except Exception as direct_error:
-            print(f"Direct download failed: {str(direct_error)}")
-
-        raise Exception("All download methods failed")
-
+                    base, _ = os.path.splitext(filename)
+                    mp3_path = f"{base}.mp3"
+                    if os.path.exists(mp3_path):
+                        return mp3_path
+                    
+        st.error("Failed to download with yt-dlp, trying alternative method...")
+        
+        # Fallback to pytube
+        from pytube import YouTube
+        yt = YouTube(url)
+        stream = yt.streams.filter(only_audio=True).first()
+        out_file = stream.download(output_path=temp_dir)
+        return out_file
+        
     except Exception as e:
-        print(f"Error downloading video: {str(e)}")
+        st.error(f"Download failed: {str(e)}")
         raise Exception(f"Failed to download video: {str(e)}")
 
 def extract_frames(video_path, interval=5):
@@ -1096,6 +1044,14 @@ def check_api_keys():
         st.info("You can still use the app without Claude AI, but blog generation will use the offline mode.")
     return bool(CLAUDE_API_KEY)
 
+def init_async():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
 def main():
     st.set_page_config(
         page_title="Video to Blog Converter",
@@ -1257,28 +1213,15 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
-    # Set up event loop with better error handling
-    def setup_event_loop():
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop
-
-    # Initialize event loop
-    loop = setup_event_loop()
-
-    # Run the application
+    # Setup proper async handling
+    loop = init_async()
+    
     try:
+        # Your main application code
+        st.set_page_config(
+            page_title="Your App Title",
+            layout="wide"
+        )
         main()
     except Exception as e:
         st.error(f"Application error: {str(e)}")
-    finally:
-        # Clean up
-        try:
-            pending = asyncio.all_tasks(loop)
-            loop.run_until_complete(asyncio.gather(*pending))
-            loop.close()
-        except Exception:
-            pass
