@@ -29,14 +29,25 @@ import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
 import asyncio
-import nest_asyncio
 import sys
 
 if sys.version_info[0] == 3 and sys.version_info[1] >= 12:
     class PathFix:
         def __init__(self):
             self._path = []
-    sys.modules['torch'].__path__ = PathFix()
+            
+        @property
+        def _path(self):
+            return self._path_value
+            
+        @_path.setter
+        def _path(self, value):
+            self._path_value = value
+    
+    if 'torch' in sys.modules:
+        sys.modules['torch'].__path__ = PathFix()
+        if hasattr(sys.modules['torch'], '_classes'):
+            sys.modules['torch']._classes.__path__ = PathFix()
 
 try:
     import pdfkit
@@ -1219,7 +1230,7 @@ if __name__ == "__main__":
     try:
         # Your main application code
         st.set_page_config(
-            page_title="Your App Title",
+            page_title="Video to Blog Converter",
             layout="wide"
         )
         main()
