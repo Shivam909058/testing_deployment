@@ -1,0 +1,16 @@
+streamlit
+yt-dlp
+opencv-python
+pillow
+transformers
+openai
+nltk
+scikit-learn
+beautifulsoup4
+textstat
+torch
+torchvision
+jinja2
+pdfkit
+markdown
+python-dotenv
