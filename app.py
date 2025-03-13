@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 import json
 import time
 import requests
-import anthropic
+from anthropic import Anthropic
 import re
 import whisper
 from moviepy.editor import VideoFileClip, AudioFileClip
