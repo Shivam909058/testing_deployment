@@ -678,14 +678,14 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video using enhanced error handling and multiple fallback methods"""
+    """Download YouTube video using enhanced error handling and SSL verification bypass"""
     print(f"Attempting to download video: {url}")
     
     # Create temp directory if it doesn't exist
     os.makedirs("temp", exist_ok=True)
     
     try:
-        # Configure yt-dlp options with more robust settings
+        # Configure yt-dlp options with SSL verification disabled
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': 'temp/%(title)s.%(ext)s',
@@ -693,7 +693,7 @@ def download_youtube_video(url):
             'no_warnings': False,
             'extract_audio': True,
             'audio_format': 'mp3',
-            'nocheckcertificate': True,
+            'nocheckcertificate': True,  # Disable SSL verification
             'ignoreerrors': True,
             'no_color': True,
             'noprogress': False,
@@ -702,90 +702,81 @@ def download_youtube_video(url):
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
             },
             'socket_timeout': 30,
             'retries': 10,
-            'external_downloader': 'ffmpeg',
-            'external_downloader_args': ['-timeout', '30'],
-            'concurrent_fragment_downloads': 1
         }
 
-        # Try multiple download methods
-        methods = [
-            # Method 1: Direct audio download
-            {**ydl_opts, 'format': 'bestaudio[ext=m4a]/bestaudio/best'},
-            # Method 2: Best video with audio
-            {**ydl_opts, 'format': 'best[height<=720]'},
-            # Method 3: Worst video with audio
-            {**ydl_opts, 'format': 'worst'},
-            # Method 4: Audio only with different format
-            {**ydl_opts, 'format': 'worstaudio/worst'}
-        ]
-
-        last_error = None
-        for method_opts in methods:
-            try:
-                with yt_dlp.YoutubeDL(method_opts) as ydl:
-                    print(f"Trying download with format: {method_opts['format']}")
-                    
-                    # Extract info first
-                    info = ydl.extract_info(url, download=False)
-                    if not info:
-                        continue
-
-                    video_title = info.get('title', 'video')
-                    safe_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
-                    
-                    # Try download
-                    ydl.download([url])
-                    
-                    # Check multiple possible output paths
-                    potential_paths = [
-                        os.path.join("temp", f"{safe_title}.mp3"),
-                        os.path.join("temp", f"{safe_title}.m4a"),
-                        os.path.join("temp", f"{safe_title}.webm"),
-                        os.path.join("temp", f"{safe_title}.mp4")
-                    ]
-                    
-                    for path in potential_paths:
-                        if os.path.exists(path):
-                            print(f"Successfully downloaded to: {path}")
-                            return path
-                            
-            except Exception as e:
-                print(f"Download attempt failed: {str(e)}")
-                last_error = e
-                continue
-
-        # Final fallback: Try direct ffmpeg download
+        # Try using pytube as first attempt
         try:
-            print("Attempting ffmpeg direct download...")
-            output_path = os.path.join("temp", f"video_fallback.mp3")
-            command = [
-                "ffmpeg", "-y",
-                "-http_persistent", "0",
-                "-timeout", "30",
-                "-i", url,
-                "-vn",  # No video
-                "-acodec", "libmp3lame",
-                "-ar", "44100",
-                "-ab", "192k",
-                "-f", "mp3",
-                output_path
-            ]
-            
-            subprocess.run(command, check=True, capture_output=True, text=True)
-            
-            if os.path.exists(output_path):
-                return output_path
-                
-        except Exception as ffmpeg_error:
-            print(f"FFmpeg fallback failed: {str(ffmpeg_error)}")
-            last_error = ffmpeg_error
+            from pytube import YouTube
+            print("Attempting download with pytube...")
+            yt = YouTube(url)
+            stream = yt.streams.filter(only_audio=True).first()
+            output_path = stream.download(output_path="temp")
+            print(f"Successfully downloaded with pytube to: {output_path}")
+            return output_path
+        except Exception as pytube_error:
+            print(f"Pytube download failed: {str(pytube_error)}")
 
-        raise Exception(f"All download methods failed. Last error: {str(last_error)}")
+        # Try yt-dlp with different methods
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                print("Attempting download with yt-dlp...")
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    filename = ydl.prepare_filename(info)
+                    # Handle potential filename extension changes
+                    possible_extensions = ['.mp3', '.m4a', '.webm', '.mp4']
+                    for ext in possible_extensions:
+                        potential_file = os.path.splitext(filename)[0] + ext
+                        if os.path.exists(potential_file):
+                            print(f"Successfully downloaded to: {potential_file}")
+                            return potential_file
+        except Exception as ytdlp_error:
+            print(f"yt-dlp download failed: {str(ytdlp_error)}")
+
+        # Try using youtube-dl as fallback
+        try:
+            import youtube_dl
+            print("Attempting download with youtube-dl...")
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    filename = ydl.prepare_filename(info)
+                    if os.path.exists(filename):
+                        print(f"Successfully downloaded with youtube-dl to: {filename}")
+                        return filename
+        except Exception as ytdl_error:
+            print(f"youtube-dl download failed: {str(ytdl_error)}")
+
+        # Final attempt using requests to download directly
+        try:
+            print("Attempting direct download...")
+            import requests
+            # Disable SSL verification for requests
+            session = requests.Session()
+            session.verify = False
+            
+            # Suppress SSL warnings
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            response = session.get(url, stream=True)
+            output_path = os.path.join("temp", "direct_download.mp4")
+            
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print(f"Successfully downloaded directly to: {output_path}")
+                return output_path
+        except Exception as direct_error:
+            print(f"Direct download failed: {str(direct_error)}")
+
+        raise Exception("All download methods failed")
 
     except Exception as e:
         print(f"Error downloading video: {str(e)}")
@@ -1266,22 +1257,28 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
-    # Set up event loop
-    if os.name == 'nt':  # Windows
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # Run the main application
+    # Set up event loop with better error handling
+    def setup_event_loop():
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop
+
+    # Initialize event loop
+    loop = setup_event_loop()
+
+    # Run the application
     try:
         main()
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
     finally:
-        # Clean up the event loop
+        # Clean up
         try:
+            pending = asyncio.all_tasks(loop)
+            loop.run_until_complete(asyncio.gather(*pending))
             loop.close()
-        except:
+        except Exception:
             pass
