@@ -81,7 +81,8 @@ def load_models():
         image_captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-large")
         
         model_name = "google/vit-base-patch16-224"
-        feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+        from transformers import ViTImageProcessor
+        feature_extractor = ViTImageProcessor.from_pretrained(model_name, use_fast=True)
         model = AutoModel.from_pretrained(model_name)
         
         def extract_features(image):
