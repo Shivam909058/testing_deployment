@@ -184,74 +184,122 @@ def extract_blog_content(content):
         }
 
 def generate_blog_with_claude(transcription, frames, timestamps, captions):
-    """Generate a high-quality blog using Claude API with improved prompting"""
+    """Generate a high-quality blog based on video content with intelligent image placement"""
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
         
-        # Create frame contexts with nearby transcript segments
-        frame_contexts = []
-        for i, (frame_time, caption) in enumerate(zip(timestamps, captions)):
-            relevant_segments = [
-                seg['text'] for seg in transcription['segments']
-                if abs(seg['start'] - frame_time) < 5 or abs(seg['end'] - frame_time) < 5
-            ]
-            frame_contexts.append({
-                'frame_num': i,
-                'timestamp': frame_time,
-                'caption': caption,
-                'context': ' '.join(relevant_segments)
-            })
+        # First, analyze the transcript for key topics and structure
+        analysis_prompt = f"""
+        Analyze this video transcript and identify:
+        1. Main topics and themes
+        2. Key points and insights
+        3. Supporting examples or data
+        4. Technical concepts explained
+        5. Practical applications discussed
+        6. Natural content segments
+        7. Important quotes or statements
+        8. Industry trends mentioned
+        9. Expert opinions or citations
+        10. Action items or takeaways
 
-        # Enhanced prompt for better blog generation
-        prompt = f"""
-        Create a comprehensive, long-form blog post (2000-3000 words) based on this video transcript and visuals.
+        Transcript:
+        {transcription['full_text']}
+
+        Provide a detailed analysis that will help structure a comprehensive blog post.
+        """
         
-        Video Context:
-        {transcription['segments'][0]['text'][:200]}...
+        analysis_response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=2000,
+            temperature=0.3,
+            system="You are an expert content analyst specializing in video content analysis.",
+            messages=[{"role": "user", "content": analysis_prompt}]
+        )
+        
+        # Create intelligent image mapping
+        visual_context = {}
+        for i, (timestamp, caption) in enumerate(zip(timestamps, captions)):
+            relevant_segments = [
+                seg for seg in transcription['segments']
+                if abs(seg['start'] - timestamp) < 15  # Increased window to 15 seconds
+            ]
+            if relevant_segments:
+                visual_context[timestamp] = {
+                    'image_index': i,
+                'caption': caption,
+                    'context': relevant_segments[0]['text'],
+                    'timestamp': timestamp
+                }
+        
+        # Generate the comprehensive blog
+        blog_prompt = f"""
+        Create a comprehensive, engaging blog post based on this video content.
+        Use the content analysis and available images to create a well-structured article.
+
+        Content Analysis:
+        {analysis_response.content[0].text}
+
+        Available Images and Context:
+        {json.dumps(visual_context, indent=2)}
 
         Full Transcript:
         {transcription['full_text']}
 
-        Visual Elements:
-        {json.dumps(frame_contexts, indent=2)}
-
         Requirements:
 
-        1. Structure:
-           - SEO-optimized headline with main keyword
-           - Executive summary (300-500 words)
-           - Table of contents
-           - 5-7 main sections with descriptive subheadings
-           - Conclusion with key takeaways
-           - Call to action
+        1. Content Structure:
+           - Create an SEO-optimized headline that captures the main topic
+           - Write a compelling introduction (2-3 paragraphs) that hooks the reader
+           - Include an executive summary (300-500 words)
+           - Create a clear table of contents
+           - Organize content into 5-7 logical sections based on the video's flow
+           - Add descriptive subheadings for each section
+           - Include a strong conclusion with actionable takeaways
+           - End with a compelling call to action
 
         2. Content Enhancement:
-           - Add relevant industry statistics
-           - Include expert insights
-           - Provide practical examples
-           - Add implementation tips
-           - Include best practices
-           - Address common questions/challenges
+           - Integrate direct quotes from the video for authenticity
+           - Add relevant industry statistics and data points
+           - Include expert insights from the video
+           - Provide practical examples and case studies
+           - Add implementation tips and best practices
+           - Address common questions and challenges
+           - Include future implications and trends
 
-        3. Image Integration:
+        3. Visual Integration:
+           - Place images strategically to support the content
            - Use this EXACT format for images:
            <img src="image_N.jpg" alt="detailed description" style="max-width: 100%; height: auto; margin: 20px 0;" />
-           - Place images naturally within the content
-           - Ensure alt text is descriptive and SEO-friendly
+           - Ensure each image relates to the surrounding text
+           - Add descriptive alt text for SEO
+           - Place images at natural breaks in content
 
         4. Engagement Elements:
-           - Add thought-provoking questions
-           - Include actionable tips
-           - Use bullet points and lists
-           - Add highlight boxes for key insights
-           - Include tweetable quotes
+           - Add thought-provoking questions throughout
+           - Include highlighted key quotes
+           - Use bullet points for lists and takeaways
+           - Create info boxes for important concepts
+           - Add "Tweet This" quotes
+           - Include expert tips boxes
+           - Use examples and analogies for complex concepts
+
+        5. SEO Optimization:
+           - Use semantic keywords naturally
+           - Optimize header hierarchy
+           - Include internal linking suggestions
+           - Add meta description
+           - Use LSI keywords
+           - Optimize for featured snippets
 
         Format the response as a JSON object with:
-        {{
+        {
             "title": "SEO-optimized title",
-            "meta_description": "150-160 character description",
-            "content": "Full HTML blog content"
-        }}
+            "meta_description": "Compelling 150-160 character description",
+            "content": "Full HTML blog content with strategically placed images"
+        }
+
+        Make the content comprehensive, engaging, and highly valuable to readers.
+        Focus on maintaining the speaker's voice while adding professional polish.
         """
 
         # Generate blog with Claude
@@ -259,8 +307,8 @@ def generate_blog_with_claude(transcription, frames, timestamps, captions):
             model=CLAUDE_MODEL,
             max_tokens=4000,
             temperature=0.7,
-            system="You are an expert technical writer specializing in comprehensive, long-form content.",
-            messages=[{"role": "user", "content": prompt}]
+            system="You are an expert blog writer specializing in creating engaging, comprehensive content from video transcripts.",
+            messages=[{"role": "user", "content": blog_prompt}]
         )
 
         content = response.content[0].text
@@ -286,7 +334,7 @@ def generate_blog_with_claude(transcription, frames, timestamps, captions):
     except Exception as e:
         st.error(f"Error generating blog with Claude: {str(e)}")
         st.info("Falling back to offline blog generation...")
-        return generate_enhanced_blog(captions, timestamps)
+        return generate_enhanced_blog(transcription['full_text'], captions, timestamps)
 
 def load_blog_templates():
     """Load Jinja2 templates for different blog styles"""
@@ -679,15 +727,15 @@ def extract_audio_and_transcribe(video_path):
                 try:
                     # Use ffmpeg directly
                     st.info("Extracting audio with ffmpeg...")
-                    ffmpeg_cmd = [
-                        "ffmpeg", "-y", "-i", video_path,
-                        "-vn", "-acodec", "pcm_s16le", 
-                        "-ar", "16000", "-ac", "1",
-                        audio_path
-                    ]
-                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                        ffmpeg_cmd = [
+                            "ffmpeg", "-y", "-i", video_path,
+                            "-vn", "-acodec", "pcm_s16le", 
+                            "-ar", "16000", "-ac", "1",
+                            audio_path
+                        ]
+                        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
                     st.success("Audio extraction successful")
-                except Exception as ffmpeg_error:
+                    except Exception as ffmpeg_error:
                     raise Exception(f"Audio extraction failed: {str(ffmpeg_error)}")
 
             with st.status("Transcribing audio..."):
@@ -703,7 +751,7 @@ def transcribe_with_fallbacks(audio_path):
         # First try Whisper model
         audio_data, sample_rate = sf.read(audio_path)
         if audio_data.dtype != np.float32:
-            audio_data = audio_data.astype(np.float32)
+        audio_data = audio_data.astype(np.float32)
         
         # If stereo, convert to mono
         if len(audio_data.shape) > 1:
@@ -791,142 +839,70 @@ def transcribe_with_fallbacks(audio_path):
         'segments': [{'text': "No transcription available", 'start': 0, 'end': 0}]
     }
 
-def generate_enhanced_blog(captions, timestamps):
-    """Generate an enhanced blog from image captions without external APIs"""
-    title = "Video Content Analysis and Summary"
-    meta_description = "A comprehensive visual analysis of the video content with key insights and highlights."
-    
-    content = f"<h1>{title}</h1>\n\n"
-    content += "<p>This in-depth analysis explores the visual elements and key moments of the video through advanced image recognition technology. Each section provides context and insights about different aspects of the content.</p>\n\n"
-    
-    all_captions = " ".join(captions)
-    common_words = []
-    
-    words = all_captions.lower().split()
-    word_count = {}
-    
-    for word in words:
-        if len(word) > 3 and word not in ['this', 'that', 'with', 'from', 'have', 'there', 'what', 'when', 'where', 'which', 'while', 'would', 'person', 'people', 'image', 'photo', 'picture']:
-            word_count[word] = word_count.get(word, 0) + 1
-    
-    top_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)[:5]
-    common_words = [word for word, count in top_words if count > 1]
-    
-    heading_prefixes = [
-        "Exploring", "Analysis of", "Insights on",
-        "Understanding", "Detailed Look at", "Highlights of"
-    ]
-    
-    sections = []
-    
-    if common_words:
-        for i, theme in enumerate(common_words):
-            theme_captions = []
-            for j, (caption, timestamp) in enumerate(zip(captions, timestamps)):
-                if theme.lower() in caption.lower():
-                    theme_captions.append((caption, timestamp, j))
-            
-            if theme_captions:
-                prefix = heading_prefixes[i % len(heading_prefixes)]
-                sections.append({
-                    "title": f"{prefix} {theme.capitalize()}",
-                    "captions": theme_captions,
-                    "intro": f"This section examines {theme} in detail, highlighting key aspects and visual elements related to this concept."
-                })
-    
-    used_indices = set()
-    for section in sections:
-        for _, _, idx in section["captions"]:
-            used_indices.add(idx)
-    
-    remaining = []
-    for i, (caption, timestamp) in enumerate(zip(captions, timestamps)):
-        if i not in used_indices:
-            remaining.append((caption, timestamp, i))
-    
-    if remaining:
-        time_based_sections = []
-        current_section = {"title": "Opening Sequence", "captions": [], "intro": "The video begins with these key visual elements."}
+def generate_enhanced_blog(transcript_text, captions, timestamps):
+    """Generate a blog from transcript with support for images"""
+    try:
+        # Extract main topics from transcript
+        sentences = transcript_text.split('.')
+        title = "Understanding " + sentences[0].strip()
         
-        section_titles = ["Early Developments", "Key Moments", "Notable Elements", "Further Exploration", "Concluding Visuals"]
-        section_intros = [
-            "As the video progresses, several important elements emerge.",
-            "These moments represent significant aspects of the video content.",
-            "The following visuals showcase notable features observed in the video.",
-            "Further exploration reveals additional interesting aspects of the content.",
-            "The final portion of the video presents these concluding elements."
+        # Create sections based on content
+    content = f"<h1>{title}</h1>\n\n"
+        
+        # Add introduction
+        content += "<h2>Introduction</h2>\n\n"
+        content += f"<p>{'. '.join(sentences[:3])}</p>\n\n"
+        
+        # Split content into sections
+        section_length = len(sentences) // 4  # Create 4 main sections
+        
+        sections = [
+            "Key Concepts",
+            "Detailed Analysis",
+            "Important Insights",
+            "Practical Applications"
         ]
         
-        num_sections = min(len(section_titles), len(remaining) // 3 + (1 if len(remaining) % 3 else 0))
-        
-        if num_sections > 0:
-            items_per_section = max(1, len(remaining) // num_sections)
+        # Create sections with content and relevant images
+        for i, section_title in enumerate(sections):
+            content += f"<h2>{section_title}</h2>\n\n"
             
-            for i, (caption, timestamp, idx) in enumerate(remaining):
-                section_idx = min(i // items_per_section, num_sections - 1)
-                
-                if i > 0 and section_idx > len(time_based_sections):
-                    if current_section["captions"]:
-                        time_based_sections.append(current_section)
-                    title_idx = min(len(time_based_sections), len(section_titles) - 1)
-                    intro_idx = min(len(time_based_sections), len(section_intros) - 1)
-                    current_section = {
-                        "title": section_titles[title_idx],
-                        "captions": [],
-                        "intro": section_intros[intro_idx]
-                    }
-                
-                current_section["captions"].append((caption, timestamp, idx))
+            start_idx = i * section_length
+            end_idx = (i + 1) * section_length
+            section_text = '. '.join(sentences[start_idx:end_idx])
             
-            if current_section["captions"]:
-                time_based_sections.append(current_section)
-                
-            sections.extend(time_based_sections)
-    
-    if not sections:
-        num_captions = len(captions)
-        captions_per_section = max(1, num_captions // 3)
-        
-        for i in range(0, num_captions, captions_per_section):
-            end_idx = min(i + captions_per_section, num_captions)
-            section_items = [(captions[j], timestamps[j], j) for j in range(i, end_idx)]
+            # Find relevant images for this section
+            section_start_time = (timestamps[0] + (timestamps[-1] - timestamps[0]) * (i / len(sections)))
+            section_end_time = (timestamps[0] + (timestamps[-1] - timestamps[0]) * ((i + 1) / len(sections)))
             
-            if i == 0:
-                title = "Introduction and Opening Sequence"
-                intro = "The video begins with these key visual elements."
-            elif end_idx >= num_captions:
-                title = "Concluding Elements and Summary"
-                intro = "The final portion of the video presents these concluding elements."
-            else:
-                title = f"Key Moments (Timeframe {i//captions_per_section + 1})"
-                intro = "These moments represent significant aspects of the video content."
-                
-            sections.append({
-                "title": title,
-                "captions": section_items,
-                "intro": intro
-            })
-    
-    content += "<h2>Introduction</h2>\n\n"
-    content += "<p>This analysis breaks down the key visual elements from the video, organized by theme and chronological sequence. Each section highlights important aspects captured from the footage, providing context and insights about the content.</p>\n\n"
-    
-    for section in sections:
-        content += f"<h2>{section['title']}</h2>\n\n"
+            relevant_images = [
+                (idx, caption) for idx, (timestamp, caption) in enumerate(zip(timestamps, captions))
+                if section_start_time <= timestamp <= section_end_time
+            ]
+            
+            # Add content with images
+            paragraphs = section_text.split('. ')
+            for j, paragraph in enumerate(paragraphs):
+                if j > 0 and j % 2 == 0 and relevant_images:  # Add image every few paragraphs
+                    img_idx, caption = relevant_images.pop(0)
+                    content += f'<img src="image_{img_idx}.jpg" alt="{caption}" style="max-width: 100%; height: auto; margin: 20px 0;" />\n\n'
+                content += f"<p>{paragraph}.</p>\n\n"
         
-        if "intro" in section:
-            content += f"<p>{section['intro']}</p>\n\n"
-        
-        for caption, timestamp, idx in section["captions"]:
-            content += f"<p>{caption}</p>\n"
-            content += f'<img src="image_{idx}.jpg" alt="{caption}" />\n\n'
-    
+        # Add conclusion
     content += "<h2>Conclusion</h2>\n\n"
-    content += "<p>This visual analysis has provided insights into the key moments and themes present in the video. The extracted frames showcase the progression and important elements throughout the content, offering a comprehensive understanding of the visual narrative.</p>\n\n"
+        content += f"<p>{'. '.join(sentences[-3:])}</p>\n\n"
     
     return {
         "title": title,
         "content": content,
-        "meta_description": meta_description
+            "meta_description": '. '.join(sentences[:2])
+        }
+    except Exception as e:
+        st.error(f"Error in enhanced blog generation: {str(e)}")
+        return {
+            "title": "Video Content Analysis",
+            "content": f"<h1>Video Content Analysis</h1>\n\n<p>{transcript_text}</p>",
+            "meta_description": "Analysis of video content"
     }
 
 def analyze_blog(content):
@@ -1101,10 +1077,10 @@ def main():
                         )
                     except Exception as e:
                         st.warning(f"Claude API failed: {str(e)}. Falling back to offline mode.")
-                        blog_data = generate_enhanced_blog(captions, unique_timestamps)
+                        blog_data = generate_enhanced_blog(transcription['full_text'], captions, timestamps)
                 else:
                     st.info("Generating blog from video transcript...")
-                    blog_data = generate_enhanced_blog(captions, unique_timestamps)
+                    blog_data = generate_enhanced_blog(transcription['full_text'], captions, timestamps)
                 
                 with tempfile.TemporaryDirectory() as temp_dir:
                     image_files = []
