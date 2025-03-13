@@ -26,7 +26,7 @@ import re
 import whisper
 from moviepy.editor import VideoFileClip, AudioFileClip
 import subprocess
-import librosa
+import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
 
@@ -713,8 +713,13 @@ def transcribe_with_fallbacks(audio_path):
     """Transcribe audio using multiple fallback methods"""
     try:
         # First try Whisper model
-        audio_data, sample_rate = librosa.load(audio_path, sr=16000)
-        audio_data = audio_data.astype(np.float32)
+        audio_data, sample_rate = sf.read(audio_path)
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
+        
+        # If stereo, convert to mono
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=1)
         
         result = whisper_model.transcribe(
             audio_data,

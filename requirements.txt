@@ -8,14 +8,15 @@ torch
 torchvision
 anthropic
 openai-whisper
-moviepy
 python-dotenv
 beautifulsoup4
 markdown
 Jinja2
-librosa
 weasyprint
 playwright
 reportlab
 pdfkit
 scikit-learn
+moviepy
+# Use soundfile instead of librosa since librosa has compatibility issues with Python 3.12
+soundfile
