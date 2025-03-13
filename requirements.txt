@@ -19,4 +19,6 @@ reportlab
 pdfkit
 scikit-learn
 soundfile
-nest-asyncio>=1.5.8
+nest-asyncio
+ffmpeg
+

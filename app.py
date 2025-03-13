@@ -29,6 +29,7 @@ import soundfile as sf
 import zipfile
 from bs4 import BeautifulSoup
 import asyncio
+import nest_asyncio
 
 try:
     import pdfkit
@@ -1219,11 +1220,16 @@ def main():
                     os.remove(video_path)
 
 if __name__ == "__main__":
-    # Simple event loop setup without nest_asyncio
+    try:
+        nest_asyncio.apply()
+    except Exception:
+        pass
+
+    # Ensure we have an event loop
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    
+
     main()
