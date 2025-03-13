@@ -666,20 +666,81 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video"""
+    """Download YouTube video with improved error handling and user agent configuration"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]',
             'outtmpl': 'temp_video.%(ext)s',
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            # Add user agent and other HTTP headers
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
+            # Add cookies handling
+            'cookiesfrombrowser': ('chrome',),  # Use cookies from Chrome
+            # Add retries
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            # Add rate limiting
+            'sleep_interval': 1,
+            'max_sleep_interval': 5,
+            # Add network settings
+            'socket_timeout': 30,
+            'nocheckcertificate': True,
         }
+        
+        st.info("Attempting to download video...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_path = ydl.prepare_filename(info)
-            return video_path
+            try:
+                # First try to extract info without downloading
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise Exception("Could not extract video information")
+                
+                # Check if video is available
+                if info.get('is_live', False):
+                    raise Exception("Live streams are not supported")
+                
+                # Now download the video
+                st.info(f"Downloading video: {info.get('title', 'Unknown title')}")
+                info = ydl.extract_info(url, download=True)
+                video_path = ydl.prepare_filename(info)
+                
+                if not os.path.exists(video_path):
+                    raise Exception("Video file was not created")
+                
+                st.success("Video downloaded successfully")
+                return video_path
+                
+            except yt_dlp.utils.DownloadError as e:
+                if "HTTP Error 403" in str(e):
+                    st.error("Access forbidden. This might be due to region restrictions or video privacy settings.")
+                    raise Exception("Video is not accessible: Region restricted or private")
+                elif "Video unavailable" in str(e):
+                    st.error("Video is unavailable. It might have been removed or set to private.")
+                    raise Exception("Video is unavailable")
+                else:
+                    raise Exception(f"Download error: {str(e)}")
+                    
     except Exception as e:
-        raise Exception(f"Failed to download video: {str(e)}")
+        st.error(f"Error downloading video: {str(e)}")
+        # Try alternative download method if first one fails
+        try:
+            st.info("Trying alternative download method...")
+            ydl_opts['format'] = 'best[height<=480]'  # Try lower quality
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_path = ydl.prepare_filename(info)
+                if os.path.exists(video_path):
+                    st.success("Video downloaded successfully with alternative method")
+                    return video_path
+        except Exception as alt_e:
+            raise Exception(f"Failed to download video: {str(e)}. Alternative method also failed: {str(alt_e)}")
 
 def extract_frames(video_path, interval=5):
     """Extract frames from video at given interval (seconds)"""
