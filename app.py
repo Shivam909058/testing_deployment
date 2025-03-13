@@ -24,7 +24,6 @@ import requests
 from anthropic import Anthropic
 import re
 import whisper
-from moviepy.editor import VideoFileClip, AudioFileClip
 import subprocess
 import soundfile as sf
 import zipfile
@@ -671,36 +670,25 @@ def caption_image(frame):
         return f"Failed to generate caption: {str(e)}"
 
 def extract_audio_and_transcribe(video_path):
-    """Extract audio from video and transcribe it using multiple fallback methods"""
+    """Extract audio from video and transcribe it using ffmpeg"""
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             with st.status("Extracting audio from video..."):
                 audio_path = os.path.join(temp_dir, "temp_audio.wav")
                 
-                # First try MoviePy
                 try:
-                    video = VideoFileClip(video_path)
-                    if video.audio is None:
-                        raise Exception("No audio track found in video")
-                    
-                    video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-                    video.close()
-                    st.success("Audio extracted successfully")
-                except Exception as e:
-                    st.warning(f"MoviePy extraction failed: {str(e)}")
-                    try:
-                        # Fallback to ffmpeg
-                        st.info("Trying ffmpeg extraction...")
-                        ffmpeg_cmd = [
-                            "ffmpeg", "-y", "-i", video_path,
-                            "-vn", "-acodec", "pcm_s16le", 
-                            "-ar", "16000", "-ac", "1",
-                            audio_path
-                        ]
-                        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
-                        st.success("FFmpeg extraction successful")
-                    except Exception as ffmpeg_error:
-                        raise Exception(f"All audio extraction methods failed: {str(ffmpeg_error)}")
+                    # Use ffmpeg directly
+                    st.info("Extracting audio with ffmpeg...")
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y", "-i", video_path,
+                        "-vn", "-acodec", "pcm_s16le", 
+                        "-ar", "16000", "-ac", "1",
+                        audio_path
+                    ]
+                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                    st.success("Audio extraction successful")
+                except Exception as ffmpeg_error:
+                    raise Exception(f"Audio extraction failed: {str(ffmpeg_error)}")
 
             with st.status("Transcribing audio..."):
                 transcription = transcribe_with_fallbacks(audio_path)

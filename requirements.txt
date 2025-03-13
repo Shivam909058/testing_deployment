@@ -4,6 +4,7 @@ opencv-python-headless
 Pillow
 numpy
 transformers
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
 anthropic
@@ -17,6 +18,4 @@ playwright
 reportlab
 pdfkit
 scikit-learn
-moviepy
-# Use soundfile instead of librosa since librosa has compatibility issues with Python 3.12
 soundfile
