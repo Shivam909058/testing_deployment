@@ -4,7 +4,8 @@ import cv2
 import os
 from PIL import Image
 import numpy as np
-from transformers import pipeline, AutoFeatureExtractor, AutoModel
+from transformers import AutoFeatureExtractor, AutoModel
+from transformers.pipelines import pipeline
 import torch
 import tempfile
 from pathlib import Path
