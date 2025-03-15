@@ -1,4 +1,12 @@
 import streamlit as st
+# Must be the first Streamlit command
+st.set_page_config(
+    page_title="Video to Blog Converter",
+    page_icon="📝",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import yt_dlp
 import cv2
 import os
@@ -30,8 +38,14 @@ import zipfile
 from bs4 import BeautifulSoup
 import asyncio
 import sys
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 
-if sys.version_info[0] == 3 and sys.version_info[1] >= 12:
+# Workaround for PyTorch compatibility with Python 3.12
+def fix_torch_classes():
     class PathFix:
         def __init__(self):
             self._path = []
@@ -44,10 +58,10 @@ if sys.version_info[0] == 3 and sys.version_info[1] >= 12:
         def _path(self, value):
             self._path_value = value
     
-    if 'torch' in sys.modules:
-        sys.modules['torch'].__path__ = PathFix()
-        if hasattr(sys.modules['torch'], '_classes'):
-            sys.modules['torch']._classes.__path__ = PathFix()
+    sys.modules['torch'].__path__ = PathFix()
+
+# Apply the fix before importing torch
+fix_torch_classes()
 
 try:
     import pdfkit
@@ -217,7 +231,7 @@ def extract_blog_content(content):
 def generate_blog_with_claude(transcription, frames, timestamps, captions):
     """Generate a high-quality blog based on video content with intelligent image placement"""
     try:
-        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        client = Anthropic(api_key=CLAUDE_API_KEY)
         
         # First, analyze the transcript for key topics and structure
         analysis_prompt = f"""
@@ -518,22 +532,6 @@ def export_blog(blog_data, format_type, template_name, images):
                         
                 except Exception as pdfkit_error:
                     st.warning(f"pdfkit error: {str(pdfkit_error)}")
-                
-                if not pdf_generated:
-                    try:
-                        from weasyprint import HTML
-                        st.info("Trying alternative PDF generation with WeasyPrint...")
-                        
-                        HTML(html_path).write_pdf(pdf_path)
-                        
-                        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-                            pdf_generated = True
-                            st.success("PDF generated successfully with WeasyPrint")
-                        else:
-                            st.warning("WeasyPrint did not generate a valid PDF file")
-                            
-                    except Exception as weasyprint_error:
-                        st.warning(f"WeasyPrint error: {str(weasyprint_error)}")
                 
                 if not pdf_generated:
                     try:
@@ -1063,14 +1061,101 @@ def init_async():
         asyncio.set_event_loop(loop)
     return loop
 
-def main():
-    st.set_page_config(
-        page_title="Video to Blog Converter",
-        page_icon="🎥",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+def create_pdf(content, output_path, title="Blog Post"):
+    """Convert content to PDF using ReportLab"""
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Create PDF document
+        doc = SimpleDocTemplate(
+            output_path,
+            pagesize=A4,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+        
+        # Styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30,
+            alignment=1
+        )
+        
+        # Build PDF content
+        elements = []
+        
+        # Add title
+        elements.append(Paragraph(title, title_style))
+        elements.append(Spacer(1, 20))
+        
+        # Add content paragraphs
+        for paragraph in content.split('\n'):
+            if paragraph.strip():
+                elements.append(Paragraph(paragraph, styles['Normal']))
+                elements.append(Spacer(1, 12))
+        
+        # Build PDF
+        doc.build(elements)
+        return True
     
+    except Exception as e:
+        st.error(f"Error creating PDF: {str(e)}")
+        return False
+
+def generate_blog_post(video_transcript, video_title):
+    """Generate blog post and PDF from video transcript"""
+    try:
+        # Format the blog content
+        blog_content = f"""
+# {video_title}
+
+{video_transcript}
+
+---
+Generated using AI
+        """
+        
+        # Create PDF file path
+        pdf_path = os.path.join("temp", f"{video_title.replace(' ', '_')}.pdf")
+        
+        # Ensure temp directory exists
+        os.makedirs("temp", exist_ok=True)
+        
+        # Generate PDF
+        if create_pdf(blog_content, pdf_path, video_title):
+            # Display success message
+            st.success("Blog post and PDF generated successfully!")
+            
+            # Add download button for PDF
+            with open(pdf_path, "rb") as pdf_file:
+                st.download_button(
+                    label="Download PDF",
+                    data=pdf_file,
+                    file_name=f"{video_title.replace(' ', '_')}.pdf",
+                    mime="application/pdf"
+                )
+            
+            # Display blog preview
+            st.markdown("### Blog Post Preview")
+            st.markdown(blog_content)
+            
+            return blog_content
+        else:
+            st.error("Failed to generate PDF")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error generating blog post: {str(e)}")
+        return None
+
+# Main Streamlit app
+def main():
     st.title("🎥 Video to Blog Converter")
     
     st.markdown("""
@@ -1229,10 +1314,6 @@ if __name__ == "__main__":
     
     try:
         # Your main application code
-        st.set_page_config(
-            page_title="Video to Blog Converter",
-            layout="wide"
-        )
         main()
     except Exception as e:
         st.error(f"Application error: {str(e)}")
