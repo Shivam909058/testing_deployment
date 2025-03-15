@@ -10,6 +10,7 @@ from datetime import datetime
 import torch
 from dotenv import load_dotenv
 from anthropic import Anthropic
+import nest_asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,6 +45,24 @@ st.set_page_config(
 
 # Apply PyTorch fixes for Python 3.11+
 fix_torch_for_python312()
+
+# Apply nest_asyncio to allow nested event loops
+try:
+    nest_asyncio.apply()
+except RuntimeError:
+    pass
+
+# Initialize asyncio properly
+def init_asyncio():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+# Call this at the start of your app
+init_asyncio()
 
 # Session state initialization
 if 'processed_video' not in st.session_state:
@@ -259,3 +278,6 @@ def get_anthropic_client():
     except Exception as e:
         print(f"Error initializing Anthropic client: {str(e)}")
         return None 
+
+if __name__ == "__main__":
+    main() 
