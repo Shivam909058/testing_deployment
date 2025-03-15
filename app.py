@@ -762,19 +762,54 @@ def download_youtube_video(url):
             session = requests.Session()
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': '*/*'
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive'
             }
             response = session.get(url, headers=headers, stream=True)
             if response.ok:
+                # First try yt-dlp to get the direct audio URL
+                try:
+                    ydl_opts = {
+                        'format': 'bestaudio/best',
+                        'quiet': True,
+                        'no_warnings': True,
+                        'extract_audio': True
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        audio_url = info['url']
+                        response = session.get(audio_url, headers=headers, stream=True)
+                except:
+                    pass  # Fall back to original URL if yt-dlp fails
+                
                 output_path = os.path.join(temp_dir, 'direct_download.mp3')
                 with open(output_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-                return output_path
+                
+                # Verify the downloaded file
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # Try to validate the audio file
+                    try:
+                        ffmpeg_cmd = [
+                            'ffmpeg', '-v', 'error',
+                            '-i', output_path,
+                            '-f', 'null',
+                            '-'
+                        ]
+                        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return output_path
+                    except:
+                        pass
+                
+                os.remove(output_path)  # Clean up invalid file
+            return None
         except Exception as e:
             st.warning(f"Direct download attempt failed: {str(e)}")
-        return None
+            return None
 
     def try_ffmpeg_download(url):
         """Attempt download using ffmpeg"""
@@ -862,25 +897,73 @@ def extract_audio_and_transcribe(video_path):
                 audio_path = os.path.join(temp_dir, "temp_audio.wav")
                 
                 try:
-                    # Use ffmpeg directly
-                    st.info("Extracting audio with ffmpeg...")
+                    # First try direct copy if input is already audio
+                    st.info("Attempting direct audio processing...")
                     ffmpeg_cmd = [
-                        "ffmpeg", "-y", "-i", video_path,
-                        "-vn", "-acodec", "pcm_s16le", 
-                        "-ar", "16000", "-ac", "1",
+                        "ffmpeg", "-y",
+                        "-i", video_path,
+                        "-acodec", "pcm_s16le",
+                        "-ar", "16000",
+                        "-ac", "1",
                         audio_path
                     ]
-                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
-                    st.success("Audio extraction successful")
-                except Exception as ffmpeg_error:
-                    raise Exception(f"Audio extraction failed: {str(ffmpeg_error)}")
+                    
+                    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        # If direct conversion fails, try with explicit format
+                        st.info("Trying alternative audio extraction...")
+                        ffmpeg_cmd = [
+                            "ffmpeg", "-y",
+                            "-f", "mp3",  # Explicitly specify input format
+                            "-i", video_path,
+                            "-acodec", "pcm_s16le",
+                            "-ar", "16000",
+                            "-ac", "1",
+                            audio_path
+                        ]
+                        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                        
+                        if result.returncode != 0:
+                            # If that fails too, try one more time with different settings
+                            st.info("Trying final audio extraction method...")
+                            ffmpeg_cmd = [
+                                "ffmpeg", "-y",
+                                "-i", video_path,
+                                "-vn",  # No video
+                                "-acodec", "pcm_s16le",
+                                "-ar", "16000",
+                                "-ac", "1",
+                                "-f", "wav",
+                                audio_path
+                            ]
+                            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        st.success("Audio extraction successful")
+                    else:
+                        error_msg = f"FFmpeg error: {result.stderr}"
+                        st.error(error_msg)
+                        raise Exception(error_msg)
 
-            with st.status("Transcribing audio..."):
-                transcription = transcribe_with_fallbacks(audio_path)
-                return transcription
+                except Exception as ffmpeg_error:
+                    st.error(f"Audio extraction failed: {str(ffmpeg_error)}")
+                    raise
+
+            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+                with st.status("Transcribing audio..."):
+                    transcription = transcribe_with_fallbacks(audio_path)
+                    return transcription
+            else:
+                raise Exception("No valid audio file was created")
 
     except Exception as e:
-        raise Exception(f"Failed to process audio: {str(e)}")
+        st.error(f"Failed to process audio: {str(e)}")
+        # Return a minimal transcription to allow the process to continue
+        return {
+            'full_text': "Audio processing failed. Generating blog with limited content.",
+            'segments': [{'text': "Audio processing failed", 'start': 0, 'end': 0}]
+        }
 
 def transcribe_with_fallbacks(audio_path):
     """Transcribe audio using multiple fallback methods"""
