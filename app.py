@@ -706,8 +706,8 @@ def download_youtube_video(url):
     
     def try_yt_dlp(url):
         """Attempt download with yt-dlp"""
-    try:
-        ydl_opts = {
+        try:
+            ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
                 'nocheckcertificate': True,
@@ -730,14 +730,14 @@ def download_youtube_video(url):
                 'retries': 10
             }
             
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
                 if info:
                     title = info.get('title', 'video')
                     filename = os.path.join(temp_dir, f"{sanitize_filename(title)}.mp3")
                     if os.path.exists(filename):
                         return filename
-    except Exception as e:
+        except Exception as e:
             st.warning(f"yt-dlp attempt failed: {str(e)}")
         return None
 
@@ -864,15 +864,15 @@ def extract_audio_and_transcribe(video_path):
                 try:
                     # Use ffmpeg directly
                     st.info("Extracting audio with ffmpeg...")
-                        ffmpeg_cmd = [
-                            "ffmpeg", "-y", "-i", video_path,
-                            "-vn", "-acodec", "pcm_s16le", 
-                            "-ar", "16000", "-ac", "1",
-                            audio_path
-                        ]
-                        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y", "-i", video_path,
+                        "-vn", "-acodec", "pcm_s16le", 
+                        "-ar", "16000", "-ac", "1",
+                        audio_path
+                    ]
+                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
                     st.success("Audio extraction successful")
-                    except Exception as ffmpeg_error:
+                except Exception as ffmpeg_error:
                     raise Exception(f"Audio extraction failed: {str(ffmpeg_error)}")
 
             with st.status("Transcribing audio..."):
@@ -888,7 +888,7 @@ def transcribe_with_fallbacks(audio_path):
         # First try Whisper model
         audio_data, sample_rate = sf.read(audio_path)
         if audio_data.dtype != np.float32:
-        audio_data = audio_data.astype(np.float32)
+            audio_data = audio_data.astype(np.float32)
         
         # If stereo, convert to mono
         if len(audio_data.shape) > 1:
@@ -984,7 +984,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
         title = "Understanding " + sentences[0].strip()
         
         # Create sections based on content
-    content = f"<h1>{title}</h1>\n\n"
+        content = f"<h1>{title}</h1>\n\n"
         
         # Add introduction
         content += "<h2>Introduction</h2>\n\n"
@@ -1026,12 +1026,12 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
                 content += f"<p>{paragraph}.</p>\n\n"
         
         # Add conclusion
-    content += "<h2>Conclusion</h2>\n\n"
+        content += "<h2>Conclusion</h2>\n\n"
         content += f"<p>{'. '.join(sentences[-3:])}</p>\n\n"
     
-    return {
-        "title": title,
-        "content": content,
+        return {
+            "title": title,
+            "content": content,
             "meta_description": '. '.join(sentences[:2])
         }
     except Exception as e:
@@ -1040,7 +1040,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
             "title": "Video Content Analysis",
             "content": f"<h1>Video Content Analysis</h1>\n\n<p>{transcript_text}</p>",
             "meta_description": "Analysis of video content"
-    }
+        }
 
 def analyze_blog(content):
     """Simple blog content analyzer"""
@@ -1393,6 +1393,6 @@ if __name__ == "__main__":
     
     try:
         # Your main application code
-    main()
+        main()
     except Exception as e:
         st.error(f"Application error: {str(e)}")
