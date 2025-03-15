@@ -43,6 +43,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from pytube import YouTube
 
 # Workaround for PyTorch compatibility with Python 3.12
 def fix_torch_classes():
@@ -695,49 +696,127 @@ def export_blog(blog_data, format_type, template_name, images):
             return zip_content, 'application/zip'
 
 def download_youtube_video(url):
-    """Download YouTube video with enhanced error handling for Streamlit"""
+    """Enhanced YouTube video download function with multiple fallbacks"""
     temp_dir = "temp"
     os.makedirs(temp_dir, exist_ok=True)
     
+    def sanitize_filename(title):
+        """Clean filename of invalid characters"""
+        return "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+    
+    def try_yt_dlp(url):
+        """Attempt download with yt-dlp"""
     try:
-        import yt_dlp
-        
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'nocheckcertificate': True,
-            'ignoreerrors': True,
-            'no_warnings': False,
-            'quiet': False,
-            'extract_audio': True,
-            'audio_format': 'mp3',
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                'nocheckcertificate': True,
+                'ignoreerrors': True,
+                'no_warnings': False,
+                'quiet': False,
+                'extract_audio': True,
+                'audio_format': 'mp3',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                }],
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                },
+                'socket_timeout': 30,
+                'retries': 10
             }
-        }
-        
-        with st.spinner('Downloading video...'):
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+            
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
                 if info:
-                    filename = ydl.prepare_filename(info)
-                    base, _ = os.path.splitext(filename)
-                    mp3_path = f"{base}.mp3"
-                    if os.path.exists(mp3_path):
-                        return mp3_path
-                    
-        st.error("Failed to download with yt-dlp, trying alternative method...")
-        
-        # Fallback to pytube
-        from pytube import YouTube
-        yt = YouTube(url)
-        stream = yt.streams.filter(only_audio=True).first()
-        out_file = stream.download(output_path=temp_dir)
-        return out_file
-        
+                    title = info.get('title', 'video')
+                    filename = os.path.join(temp_dir, f"{sanitize_filename(title)}.mp3")
+                    if os.path.exists(filename):
+                        return filename
     except Exception as e:
-        st.error(f"Download failed: {str(e)}")
-        raise Exception(f"Failed to download video: {str(e)}")
+            st.warning(f"yt-dlp attempt failed: {str(e)}")
+        return None
+
+    def try_pytube(url):
+        """Attempt download with pytube"""
+        try:
+            yt = YouTube(url)
+            stream = yt.streams.filter(only_audio=True).first()
+            if stream:
+                output_file = stream.download(output_path=temp_dir)
+                base, _ = os.path.splitext(output_file)
+                new_file = base + '.mp3'
+                os.rename(output_file, new_file)
+                return new_file
+        except Exception as e:
+            st.warning(f"pytube attempt failed: {str(e)}")
+        return None
+
+    def try_direct_download(url):
+        """Attempt direct download using requests"""
+        try:
+            session = requests.Session()
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Accept': '*/*'
+            }
+            response = session.get(url, headers=headers, stream=True)
+            if response.ok:
+                output_path = os.path.join(temp_dir, 'direct_download.mp3')
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return output_path
+        except Exception as e:
+            st.warning(f"Direct download attempt failed: {str(e)}")
+        return None
+
+    def try_ffmpeg_download(url):
+        """Attempt download using ffmpeg"""
+        try:
+            output_path = os.path.join(temp_dir, 'ffmpeg_download.mp3')
+            command = [
+                'ffmpeg', '-y',
+                '-http_persistent', '0',
+                '-timeout', '30',
+                '-i', url,
+                '-vn',
+                '-acodec', 'libmp3lame',
+                '-ar', '44100',
+                '-ab', '192k',
+                '-f', 'mp3',
+                output_path
+            ]
+            subprocess.run(command, check=True, capture_output=True)
+            if os.path.exists(output_path):
+                return output_path
+        except Exception as e:
+            st.warning(f"FFmpeg download attempt failed: {str(e)}")
+        return None
+
+    # Try all methods with retries
+    methods = [try_yt_dlp, try_pytube, try_direct_download, try_ffmpeg_download]
+    max_retries = 3
+    
+    for method in methods:
+        for attempt in range(max_retries):
+            try:
+                st.info(f"Attempting download using {method.__name__} (attempt {attempt + 1}/{max_retries})")
+                result = method(url)
+                if result and os.path.exists(result):
+                    st.success(f"Successfully downloaded using {method.__name__}")
+                    return result
+                time.sleep(1)  # Add delay between attempts
+            except Exception as e:
+                st.warning(f"Attempt {attempt + 1} failed with {method.__name__}: {str(e)}")
+                time.sleep(2)  # Add longer delay after failure
+    
+    raise Exception("Failed to download video after trying all methods")
 
 def extract_frames(video_path, interval=5):
     """Extract frames from video at given interval (seconds)"""
@@ -785,15 +864,15 @@ def extract_audio_and_transcribe(video_path):
                 try:
                     # Use ffmpeg directly
                     st.info("Extracting audio with ffmpeg...")
-                    ffmpeg_cmd = [
-                        "ffmpeg", "-y", "-i", video_path,
-                        "-vn", "-acodec", "pcm_s16le", 
-                        "-ar", "16000", "-ac", "1",
-                        audio_path
-                    ]
-                    subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+                        ffmpeg_cmd = [
+                            "ffmpeg", "-y", "-i", video_path,
+                            "-vn", "-acodec", "pcm_s16le", 
+                            "-ar", "16000", "-ac", "1",
+                            audio_path
+                        ]
+                        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
                     st.success("Audio extraction successful")
-                except Exception as ffmpeg_error:
+                    except Exception as ffmpeg_error:
                     raise Exception(f"Audio extraction failed: {str(ffmpeg_error)}")
 
             with st.status("Transcribing audio..."):
@@ -809,7 +888,7 @@ def transcribe_with_fallbacks(audio_path):
         # First try Whisper model
         audio_data, sample_rate = sf.read(audio_path)
         if audio_data.dtype != np.float32:
-            audio_data = audio_data.astype(np.float32)
+        audio_data = audio_data.astype(np.float32)
         
         # If stereo, convert to mono
         if len(audio_data.shape) > 1:
@@ -905,7 +984,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
         title = "Understanding " + sentences[0].strip()
         
         # Create sections based on content
-        content = f"<h1>{title}</h1>\n\n"
+    content = f"<h1>{title}</h1>\n\n"
         
         # Add introduction
         content += "<h2>Introduction</h2>\n\n"
@@ -947,12 +1026,12 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
                 content += f"<p>{paragraph}.</p>\n\n"
         
         # Add conclusion
-        content += "<h2>Conclusion</h2>\n\n"
+    content += "<h2>Conclusion</h2>\n\n"
         content += f"<p>{'. '.join(sentences[-3:])}</p>\n\n"
     
-        return {
-            "title": title,
-            "content": content,
+    return {
+        "title": title,
+        "content": content,
             "meta_description": '. '.join(sentences[:2])
         }
     except Exception as e:
@@ -961,7 +1040,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
             "title": "Video Content Analysis",
             "content": f"<h1>Video Content Analysis</h1>\n\n<p>{transcript_text}</p>",
             "meta_description": "Analysis of video content"
-        }
+    }
 
 def analyze_blog(content):
     """Simple blog content analyzer"""
@@ -1314,6 +1393,6 @@ if __name__ == "__main__":
     
     try:
         # Your main application code
-        main()
+    main()
     except Exception as e:
         st.error(f"Application error: {str(e)}")
