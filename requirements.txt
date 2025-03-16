@@ -6,3 +6,4 @@ python-dotenv
 youtube-transcript-api
 pytube
 html2text
+requests

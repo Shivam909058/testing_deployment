@@ -5,13 +5,13 @@ import json
 import re
 from typing import Dict, Any, Optional
 from datetime import datetime
-
+import sys
 # Third-party imports
 import streamlit as st
-from langchain.llms import Anthropic
+from langchain_anthropic import ChatAnthropic
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
-from langchain.document_loaders import YoutubeLoader
+from langchain_community.document_loaders import YoutubeLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains.summarize import load_summarize_chain
 from langchain.docstore.document import Document
@@ -43,11 +43,11 @@ class YouTubeBlogGenerator:
             raise ValueError("Claude API key is required. Set it as an argument or in the CLAUDE_API_KEY environment variable.")
         
         # Initialize Claude LLM
-        self.llm = Anthropic(
-            model="claude-3-5-sonnet-20240620",
+        self.llm = ChatAnthropic(
+            model="claude-3-sonnet-20240229",
             anthropic_api_key=self.api_key,
             temperature=0.7,
-            max_tokens_to_sample=4000
+            max_tokens=4000
         )
         
         logger.info("YouTube Blog Generator initialized")
@@ -65,23 +65,39 @@ class YouTubeBlogGenerator:
         logger.info(f"Extracting content from YouTube video: {url}")
         
         try:
-            # Load video transcript
-            loader = YoutubeLoader.from_youtube_url(
-                url, 
-                add_video_info=True,
-                language=["en", "en-US"]
-            )
-            documents = loader.load()
+            # First try with youtube-transcript-api directly
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from urllib.parse import parse_qs, urlparse
+            import requests
             
-            # Extract video metadata
+            # Extract video ID from URL
+            parsed_url = urlparse(url)
+            if parsed_url.hostname in ('youtu.be',):
+                video_id = parsed_url.path[1:]
+            elif parsed_url.hostname in ('www.youtube.com', 'youtube.com'):
+                if parsed_url.path == '/watch':
+                    video_id = parse_qs(parsed_url.query)['v'][0]
+                elif parsed_url.path.startswith(('/embed/', '/v/')):
+                    video_id = parsed_url.path.split('/')[2]
+            else:
+                raise ValueError("Invalid YouTube URL")
+
+            # Get video metadata using YouTube Data API or oEmbed
+            oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+            metadata = requests.get(oembed_url).json()
+            
+            # Get transcript
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US'])
+            transcript_text = ' '.join([entry['text'] for entry in transcript_list])
+            
+            # Create video info dictionary
             video_info = {
-                "title": documents[0].metadata.get("title", "Untitled Video"),
-                "author": documents[0].metadata.get("author", "Unknown"),
-                "publish_date": documents[0].metadata.get("publish_date", "Unknown"),
-                "description": documents[0].metadata.get("description", ""),
-                "view_count": documents[0].metadata.get("view_count", 0),
-                "thumbnail_url": documents[0].metadata.get("thumbnail_url", ""),
-                "transcript": documents[0].page_content
+                "title": metadata.get("title", "Untitled Video"),
+                "author": metadata.get("author_name", "Unknown"),
+                "publish_date": datetime.now().strftime("%Y-%m-%d"),  # Fallback to current date
+                "description": metadata.get("description", ""),
+                "thumbnail_url": metadata.get("thumbnail_url", ""),
+                "transcript": transcript_text
             }
             
             logger.info(f"Successfully extracted content from video: {video_info['title']}")
@@ -89,7 +105,31 @@ class YouTubeBlogGenerator:
             
         except Exception as e:
             logger.error(f"Error extracting video content: {str(e)}")
-            raise Exception(f"Failed to extract video content: {str(e)}")
+            try:
+                # Fallback to YoutubeLoader
+                loader = YoutubeLoader.from_youtube_url(
+                    url, 
+                    add_video_info=True,
+                    language=["en", "en-US"]
+                )
+                documents = loader.load()
+                
+                video_info = {
+                    "title": documents[0].metadata.get("title", "Untitled Video"),
+                    "author": documents[0].metadata.get("author", "Unknown"),
+                    "publish_date": documents[0].metadata.get("publish_date", "Unknown"),
+                    "description": documents[0].metadata.get("description", ""),
+                    "view_count": documents[0].metadata.get("view_count", 0),
+                    "thumbnail_url": documents[0].metadata.get("thumbnail_url", ""),
+                    "transcript": documents[0].page_content
+                }
+                
+                logger.info(f"Successfully extracted content using fallback method: {video_info['title']}")
+                return video_info
+                
+            except Exception as e2:
+                logger.error(f"Both extraction methods failed: {str(e2)}")
+                raise Exception(f"Failed to extract video content using both methods. Primary error: {str(e)}, Fallback error: {str(e2)}")
     
     def summarize_transcript(self, transcript: str) -> str:
         """
@@ -571,25 +611,25 @@ def main():
                 if api_key:
                     try:
                         # Test the API key with a simple request
-                        test_llm = Anthropic(
-                            model="claude-3-5-sonnet-20240620",
+                        test_llm = ChatAnthropic(
+                            model="claude-3-sonnet-20240229",
                             anthropic_api_key=api_key,
                             temperature=0.7,
-                            max_tokens_to_sample=10
+                            max_tokens=10
                         )
                         
-                        # Try a simple completion to validate the key
-                        test_prompt = PromptTemplate(
-                            input_variables=[],
-                            template="Say 'API key is valid' in 5 words or less."
-                        )
-                        test_chain = LLMChain(llm=test_llm, prompt=test_prompt)
-                        test_chain.run({})
+                        # Test the API key
+                        messages = [{"role": "user", "content": "Say 'valid' if you can read this."}]
+                        response = test_llm.invoke(messages)
                         
-                        # If we get here, the key is valid
-                        st.session_state.api_key = api_key
-                        st.session_state.api_key_valid = True
-                        st.success("✅ API key validated successfully!")
+                        if response and 'valid' in response.content.lower():
+                            st.session_state.api_key = api_key
+                            st.session_state.api_key_valid = True
+                            st.success("✅ API key validated successfully!")
+                        else:
+                            st.session_state.api_key_valid = False
+                            st.error("❌ Invalid API key response")
+                            
                     except Exception as e:
                         st.session_state.api_key_valid = False
                         st.error(f"❌ Invalid API key: {str(e)}")
@@ -789,10 +829,5 @@ def cli():
     return 0
 
 if __name__ == "__main__":
-    import sys
-    
-    # Check if running as script or Streamlit app
-    if st._is_running_with_streamlit:
-        main()
-    else:
-        sys.exit(cli())
+    # Remove the environment variable check and just run the Streamlit app
+    main()
