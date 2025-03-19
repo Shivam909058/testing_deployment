@@ -748,9 +748,9 @@ def download_youtube_video(url):
         st.info("Attempting advanced yt-dlp with cookies...")
         try:
             # First get the video info without downloading
-            ydl_opts = {
+        ydl_opts = {
                 'format': 'bestaudio/best',
-                'quiet': True,
+            'quiet': True,
                 'no_warnings': True,
                 'no_check_certificate': True,
                 'ignoreerrors': True,
@@ -767,7 +767,7 @@ def download_youtube_video(url):
                 },
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=False)
                 
                 if not info_dict:
@@ -808,7 +808,7 @@ def download_youtube_video(url):
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return output_path
                     
-        except Exception as e:
+    except Exception as e:
             st.warning(f"Advanced yt-dlp method failed: {str(e)}")
             
         return None
@@ -1139,14 +1139,14 @@ def extract_audio_and_transcribe(video_path):
                         st.error(error_msg)
                         raise Exception(error_msg)
 
-                except Exception as ffmpeg_error:
+                    except Exception as ffmpeg_error:
                     st.error(f"Audio extraction failed: {str(ffmpeg_error)}")
                     raise
 
             if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-                with st.status("Transcribing audio..."):
-                    transcription = transcribe_with_fallbacks(audio_path)
-                    return transcription
+            with st.status("Transcribing audio..."):
+                transcription = transcribe_with_fallbacks(audio_path)
+                return transcription
             else:
                 raise Exception("No valid audio file was created")
 
@@ -1164,7 +1164,7 @@ def transcribe_with_fallbacks(audio_path):
         # First try Whisper model
         audio_data, sample_rate = sf.read(audio_path)
         if audio_data.dtype != np.float32:
-            audio_data = audio_data.astype(np.float32)
+        audio_data = audio_data.astype(np.float32)
         
         # If stereo, convert to mono
         if len(audio_data.shape) > 1:
@@ -1260,7 +1260,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
         title = "Understanding " + sentences[0].strip()
         
         # Create sections based on content
-        content = f"<h1>{title}</h1>\n\n"
+    content = f"<h1>{title}</h1>\n\n"
         
         # Add introduction
         content += "<h2>Introduction</h2>\n\n"
@@ -1302,12 +1302,12 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
                 content += f"<p>{paragraph}.</p>\n\n"
         
         # Add conclusion
-        content += "<h2>Conclusion</h2>\n\n"
+    content += "<h2>Conclusion</h2>\n\n"
         content += f"<p>{'. '.join(sentences[-3:])}</p>\n\n"
     
-        return {
-            "title": title,
-            "content": content,
+    return {
+        "title": title,
+        "content": content,
             "meta_description": '. '.join(sentences[:2])
         }
     except Exception as e:
@@ -1316,7 +1316,7 @@ def generate_enhanced_blog(transcript_text, captions, timestamps):
             "title": "Video Content Analysis",
             "content": f"<h1>Video Content Analysis</h1>\n\n<p>{transcript_text}</p>",
             "meta_description": "Analysis of video content"
-        }
+    }
 
 def analyze_blog(content):
     """Simple blog content analyzer"""
@@ -1669,6 +1669,6 @@ if __name__ == "__main__":
     
     try:
         # Your main application code
-        main()
+    main()
     except Exception as e:
         st.error(f"Application error: {str(e)}")

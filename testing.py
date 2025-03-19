@@ -3,12 +3,14 @@ import argparse
 import logging
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import sys
 # Third-party imports
 import streamlit as st
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+from langchain_community.llms import Ollama
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain_community.document_loaders import YoutubeLoader
@@ -16,6 +18,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains.summarize import load_summarize_chain
 from langchain.docstore.document import Document
 from dotenv import load_dotenv
+from youtube_transcript_api import YouTubeTranscriptApi
+import requests
+from yt_dlp import YoutubeDL
 
 # Configure logging
 logging.basicConfig(
@@ -28,112 +33,1176 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-class YouTubeBlogGenerator:
-    """Generate high-quality blogs from YouTube videos using LangChain and Claude"""
+class LLMProvider:
+    """Base class for various LLM providers"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, model_name: str, api_key: Optional[str] = None, max_tokens: int = 4000):
         """
-        Initialize the YouTube Blog Generator.
+        Initialize the LLM provider.
         
         Args:
-            api_key: Claude API key (optional, will use environment variable if not provided)
+            model_name: Name of the model to use
+            api_key: API key for the model (if required)
+            max_tokens: Maximum tokens for output
         """
-        self.api_key = api_key or os.getenv("CLAUDE_API_KEY")
-        if not self.api_key:
-            raise ValueError("Claude API key is required. Set it as an argument or in the CLAUDE_API_KEY environment variable.")
+        self.model_name = model_name
+        self.api_key = api_key
+        self.max_tokens = max_tokens
+        self.llm = None
         
-        # Initialize Claude LLM
+    def get_llm(self):
+        """Get the initialized LLM instance"""
+        if self.llm is None:
+            self._initialize_llm()
+        return self.llm
+    
+    def _initialize_llm(self):
+        """Initialize the LLM (to be implemented by subclasses)"""
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def is_available(self) -> bool:
+        """Check if the LLM is available"""
+        try:
+            self.get_llm()
+            return True
+        except Exception as e:
+            logger.warning(f"LLM {self.model_name} is not available: {str(e)}")
+            return False
+
+class ClaudeProvider(LLMProvider):
+    """Claude AI LLM provider"""
+    
+    def _initialize_llm(self):
+        """Initialize Claude LLM"""
+        if not self.api_key:
+            self.api_key = os.getenv("CLAUDE_API_KEY")
+            
+        if not self.api_key:
+            raise ValueError("Claude API key is required")
+            
         self.llm = ChatAnthropic(
-            model="claude-3-sonnet-20240229",
+            model=self.model_name,
             anthropic_api_key=self.api_key,
             temperature=0.7,
-            max_tokens=4000
+            max_tokens=self.max_tokens
         )
-        
-        logger.info("YouTube Blog Generator initialized")
+        logger.info(f"Claude LLM initialized: {self.model_name}")
+
+class OpenAIProvider(LLMProvider):
+    """OpenAI LLM provider"""
     
-    def extract_video_content(self, url: str) -> Dict[str, Any]:
+    def _initialize_llm(self):
+        """Initialize OpenAI LLM"""
+        if not self.api_key:
+            self.api_key = os.getenv("OPENAI_API_KEY")
+            
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required")
+            
+        self.llm = ChatOpenAI(
+            model=self.model_name,
+            openai_api_key=self.api_key,
+            temperature=0.7,
+            max_tokens=self.max_tokens
+        )
+        logger.info(f"OpenAI LLM initialized: {self.model_name}")
+
+class OllamaProvider(LLMProvider):
+    """Local Ollama LLM provider"""
+    
+    def __init__(self, model_name: str = "llama3", base_url: str = "http://localhost:11434", max_tokens: int = 4000):
         """
-        Extract content from a YouTube video using LangChain's YoutubeLoader.
+        Initialize the Ollama LLM provider.
         
         Args:
-            url: YouTube video URL
-            
-        Returns:
-            Dictionary with video metadata and transcript
+            model_name: Name of the model to use
+            base_url: Base URL for the Ollama server
+            max_tokens: Maximum tokens for output
         """
-        logger.info(f"Extracting content from YouTube video: {url}")
+        super().__init__(model_name=model_name, max_tokens=max_tokens)
+        self.base_url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+    def _initialize_llm(self):
+        """Initialize Ollama LLM"""
+        try:
+            self.llm = Ollama(
+                model=self.model_name,
+                base_url=self.base_url,
+                temperature=0.7,
+                num_predict=self.max_tokens
+            )
+            logger.info(f"Ollama LLM initialized: {self.model_name}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Ollama: {str(e)}")
+            raise ValueError(f"Ollama initialization failed: {str(e)}")
+
+class ImageSearcher:
+    """Search and fetch relevant images for blog content"""
+    
+    def __init__(self, serp_api_key: Optional[str] = None, unsplash_api_key: Optional[str] = None):
+        self.serp_api_key = serp_api_key or os.getenv("SERP_API_KEY")
+        self.unsplash_api_key = unsplash_api_key or os.getenv("UNSPLASH_API_KEY")
+        
+    def search_images(self, query: str, num_images: int = 3) -> List[Dict[str, str]]:
+        """Search for relevant images using multiple methods"""
+        # Try all available methods
+        methods = [
+            self._search_with_serpapi,
+            self._search_with_unsplash,
+            self._search_with_pexels,
+            self._get_placeholder_images
+        ]
+        
+        for method in methods:
+            try:
+                images = method(query, num_images)
+                if images:
+                    return images
+            except Exception as e:
+                logger.warning(f"Image search method failed: {str(e)}")
+                continue
+        
+        # If all methods fail, return placeholder
+        return self._get_placeholder_images(query, num_images)
+    
+    def _search_with_serpapi(self, query: str, num_images: int) -> List[Dict[str, str]]:
+        """Search images using SerpAPI"""
+        if not self.serp_api_key:
+            return []
         
         try:
-            # First try with youtube-transcript-api directly
-            from youtube_transcript_api import YouTubeTranscriptApi
-            from urllib.parse import parse_qs, urlparse
-            import requests
+            # Import here to avoid dependency issues
+            from serpapi import GoogleSearch
             
-            # Extract video ID from URL
-            parsed_url = urlparse(url)
-            if parsed_url.hostname in ('youtu.be',):
-                video_id = parsed_url.path[1:]
-            elif parsed_url.hostname in ('www.youtube.com', 'youtube.com'):
-                if parsed_url.path == '/watch':
-                    video_id = parse_qs(parsed_url.query)['v'][0]
-                elif parsed_url.path.startswith(('/embed/', '/v/')):
-                    video_id = parsed_url.path.split('/')[2]
+            params = {
+                "q": query,
+                "tbm": "isch",
+                "num": num_images,
+                "api_key": self.serp_api_key
+            }
+            
+            search = GoogleSearch(params)
+            results = search.get_dict()
+            
+            images = []
+            for img in results.get("images_results", [])[:num_images]:
+                images.append({
+                    "url": img.get("original"),
+                    "title": img.get("title", query),
+                    "source": img.get("source", "Google Images")
+                })
+            
+            return images
+        except Exception as e:
+            logger.error(f"SerpAPI search error: {str(e)}")
+            return []
+    
+    def _search_with_unsplash(self, query: str, num_images: int) -> List[Dict[str, str]]:
+        """Search images using Unsplash API"""
+        if not self.unsplash_api_key:
+            return []
+        
+        try:
+            url = "https://api.unsplash.com/search/photos"
+            headers = {"Authorization": f"Client-ID {self.unsplash_api_key}"}
+            params = {"query": query, "per_page": num_images}
+            
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            images = []
+            for result in data.get("results", [])[:num_images]:
+                images.append({
+                    "url": result["urls"]["regular"],
+                    "title": result.get("description", query) or result.get("alt_description", query) or query,
+                    "source": f"Unsplash - {result['user']['name']}"
+                })
+            
+            return images
+        except Exception as e:
+            logger.error(f"Unsplash search error: {str(e)}")
+            return []
+    
+    def _search_with_pexels(self, query: str, num_images: int) -> List[Dict[str, str]]:
+        """Search images using Pexels API"""
+        pexels_api_key = "VxOT5bd3zF3uJXBXlFKKHO3EMFePX9rnm1DrHRvAW6kWlYKWhsCIVzDQ"
+        if not pexels_api_key:
+            return []
+        
+        try:
+            url = f"https://api.pexels.com/v1/search?query={query}&per_page={num_images}"
+            headers = {"Authorization": pexels_api_key}
+            
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            
+            images = []
+            for photo in data.get("photos", [])[:num_images]:
+                images.append({
+                    "url": photo["src"]["large"],
+                    "title": query,
+                    "source": f"Pexels - {photo['photographer']}"
+                })
+            
+            return images
+        except Exception as e:
+            logger.error(f"Pexels search error: {str(e)}")
+            return []
+    
+    def _get_placeholder_images(self, query: str, num_images: int) -> List[Dict[str, str]]:
+        """Return placeholder images when all other methods fail"""
+        return [{
+            "url": f"https://placehold.co/800x400/3498db/FFFFFF/png?text={query.replace(' ', '+')}",
+            "title": query,
+            "source": "Placeholder Image"
+        }] * num_images
+
+class YouTubeBlogGenerator:
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required")
+            
+        self.llm = ChatOpenAI(
+            model="gpt-4-turbo-preview",
+            openai_api_key=self.api_key,
+            temperature=0.7
+        )
+        
+        self.image_searcher = ImageSearcher()
+    
+    def extract_video_content(self, url: str) -> Dict[str, Any]:
+        """Enhanced video content extraction with multiple fallback methods"""
+        logger.info(f"Extracting content from YouTube video: {url}")
+        
+        # Method 1: Try youtube-transcript-api
+        try:
+            # Extract video ID
+            video_id = None
+            if "youtube.com/watch?v=" in url:
+                video_id = url.split("v=")[1].split("&")[0]
+            elif "youtu.be/" in url:
+                video_id = url.split("youtu.be/")[1].split("?")[0]
             else:
                 raise ValueError("Invalid YouTube URL")
-
-            # Get video metadata using YouTube Data API or oEmbed
-            oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-            metadata = requests.get(oembed_url).json()
             
             # Get transcript
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US'])
             transcript_text = ' '.join([entry['text'] for entry in transcript_list])
             
-            # Create video info dictionary
-            video_info = {
-                "title": metadata.get("title", "Untitled Video"),
-                "author": metadata.get("author_name", "Unknown"),
-                "publish_date": datetime.now().strftime("%Y-%m-%d"),  # Fallback to current date
-                "description": metadata.get("description", ""),
-                "thumbnail_url": metadata.get("thumbnail_url", ""),
-                "transcript": transcript_text
+            # Get metadata using oEmbed
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+            response = requests.get(oembed_url)
+            
+            if response.status_code == 200:
+                metadata = response.json()
+                return {
+                    "title": metadata.get("title", "Untitled Video"),
+                    "author": metadata.get("author_name", "Unknown Author"),
+                    "description": metadata.get("description", ""),
+                    "publish_date": datetime.now().strftime("%Y-%m-%d"),
+                    "transcript": transcript_text,
+                    "url": url
+                }
+        except Exception as e:
+            logger.warning(f"Method 1 failed: {str(e)}")
+
+        # Method 2: Try yt-dlp
+        try:
+            with YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Try to get transcript from subtitles
+                transcript = ""
+                if 'subtitles' in info and 'en' in info['subtitles']:
+                    for sub in info['subtitles']['en']:
+                        if sub['ext'] == 'vtt':
+                            sub_response = requests.get(sub['url'])
+                            lines = sub_response.text.splitlines()
+                            for line in lines:
+                                if '-->' not in line and line.strip():
+                                    transcript += line.strip() + " "
+                
+                return {
+                    "title": info.get('title', 'Untitled Video'),
+                    "author": info.get('uploader', 'Unknown Author'),
+                    "description": info.get('description', ''),
+                    "publish_date": datetime.fromtimestamp(info.get('upload_date_timestamp', 0)).strftime("%Y-%m-%d"),
+                    "transcript": transcript,
+                    "url": url
+                }
+        except Exception as e:
+            logger.warning(f"Method 2 failed: {str(e)}")
+
+        # Method 3: Try original YoutubeLoader method
+        try:
+            loader = YoutubeLoader.from_youtube_url(
+                url,
+                add_video_info=True,
+                language=["en", "en-US"]
+            )
+            video_data = loader.load()
+            
+            if video_data:
+                return {
+                    "title": video_data[0].metadata.get("title", "Untitled Video"),
+                    "author": video_data[0].metadata.get("author", "Unknown Author"),
+                    "description": video_data[0].metadata.get("description", ""),
+                    "publish_date": video_data[0].metadata.get("publish_date", ""),
+                    "transcript": video_data[0].page_content,
+                    "url": url
+                }
+        except Exception as e:
+            logger.warning(f"Method 3 failed: {str(e)}")
+
+        raise ValueError("Failed to extract video content using all available methods")
+
+    def generate_blog_post(self, video_info: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Generate a comprehensive blog post that uses the video as context but creates original, high-quality content.
+        """
+        logger.info("Generating blog post")
+        
+        try:
+            # Create summary if not already available
+            summary = self.summarize_transcript(video_info["transcript"])
+            
+            # Extract blog style and length preferences
+            blog_style = analysis.get("style", "Professional")
+            blog_length = analysis.get("length", "Comprehensive (4000+ words)")
+            
+            # Determine word count based on selected length
+            min_word_count = 2000
+            if "Detailed" in blog_length:
+                min_word_count = 3000
+            elif "Comprehensive" in blog_length:
+                min_word_count = 4000
+            
+            # Extract core themes and topics from the video first
+            themes_prompt = f"""
+            Extract the core themes, concepts, and key insights from this YouTube video transcript:
+            
+            Video Title: {video_info["title"]}
+            Video Author: {video_info["author"]}
+            
+            Transcript Summary:
+            {summary}
+            
+            Identify:
+            1. The main theme or subject of the video
+            2. 5-7 key concepts or topics covered
+            3. The most valuable insights presented
+            4. Any unique perspectives or frameworks mentioned
+            5. The core problem or question the video addresses
+            6. The target audience who would benefit most from this information
+            
+            Focus on extracting the essential knowledge, not just summarizing the video structure.
+            """
+            
+            themes_response = self.llm.invoke(
+                [{"role": "system", "content": "You are an expert knowledge extractor who identifies core themes and insights from content."},
+                 {"role": "user", "content": themes_prompt}],
+                temperature=0.3
+            )
+            
+            themes_text = themes_response.content if hasattr(themes_response, 'content') else str(themes_response)
+            
+            # Now, create a blog structure that addresses these themes in an original way
+            structure_prompt = f"""
+            Create a detailed blog structure based on these themes extracted from a YouTube video:
+            
+            Video Title: {video_info["title"]}
+            Video Author: {video_info["author"]}
+            
+            Extracted Themes and Insights:
+            {themes_text}
+            
+            Design a comprehensive blog structure that:
+            1. Uses these themes as a foundation but organizes them in an original, engaging way
+            2. Addresses the core subject from multiple perspectives
+            3. Creates a logical flow that builds reader understanding progressively
+            4. Includes practical applications and real-world implications
+            5. Balances technical depth with accessibility
+            
+            FORMAT YOUR RESPONSE AS JSON:
+            {{
+                "title": "An original, compelling H1 title related to the subject",
+                "meta_description": "A 150-160 character description of the blog content",
+                "introduction": "Hook and brief context about why this topic matters",
+                "sections": [
+                    {{
+                        "heading": "Main section heading (H2)",
+                        "objective": "What this section helps readers understand or accomplish",
+                        "key_concepts": ["Key concept 1", "Key concept 2", "Key concept 3"],
+                        "subsections": [
+                            {{
+                                "heading": "Subsection heading (H3)",
+                                "focus_points": ["Focus point 1", "Focus point 2", "Focus point 3"]
+                            }},
+                            ... more subsections
+                        ]
+                    }},
+                    ... more sections
+                ],
+                "practical_applications": ["Application 1", "Application 2", "Application 3"],
+                "conclusion": "Summary of core value and key takeaways",
+                "image_concepts": ["Specific image concept 1", "Specific image concept 2"]
+            }}
+            
+            Create 6-8 main sections with 2-3 subsections each. Focus on creating valuable content that goes beyond just repeating what was in the video.
+            """
+            
+            # Get the blog structure
+            structure_response = self.llm.invoke(
+                [{"role": "system", "content": "You are an expert content strategist who creates original, valuable blog structures based on extracted themes."},
+                 {"role": "user", "content": structure_prompt}],
+                temperature=0.7
+            )
+            
+            structure_text = structure_response.content if hasattr(structure_response, 'content') else str(structure_response)
+            
+            # Extract JSON structure
+            try:
+                # Clean up any text outside of the JSON
+                json_match = re.search(r'```json\s*(.*?)\s*```', structure_text, re.DOTALL)
+                if json_match:
+                    structure_text = json_match.group(1)
+                else:
+                    # Try to find JSON object
+                    json_start = structure_text.find('{')
+                    json_end = structure_text.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        structure_text = structure_text[json_start:json_end]
+            
+                blog_structure = json.loads(structure_text)
+            
+            except Exception as e:
+                logger.warning(f"Failed to parse blog structure as JSON: {str(e)}")
+                # If we can't parse the JSON, create a fallback structure
+                blog_structure = {
+                    "title": video_info["title"],
+                    "meta_description": f"A comprehensive guide exploring the concepts from {video_info['title']}",
+                    "introduction": "This blog explores key concepts and practical applications from the ideas presented in the video.",
+                    "sections": [{"heading": "Understanding the Core Concepts", "objective": "Provide foundational knowledge", "key_concepts": ["Key Concept 1"], "subsections": [{"heading": "The Fundamentals", "focus_points": ["Focus Point 1"]}]}],
+                    "practical_applications": ["Practical Application 1"],
+                    "conclusion": "By understanding these concepts, you can apply them to improve your approach.",
+                    "image_concepts": [f"{video_info['title']} concept illustration", f"{video_info['title']} practical application"]
+                }
+
+            # Now, generate the full content for each section based on the structure
+            html_content = []
+            
+            # Add title
+            html_content.append(f"<h1>{blog_structure['title']}</h1>")
+            
+            # Add introduction - Fix the backslash issue by handling paragraphs differently
+            introduction_text = blog_structure['introduction']
+            introduction_paragraphs = introduction_text.replace("\n\n", "\n").split("\n")
+            introduction_html = ""
+            for paragraph in introduction_paragraphs:
+                if paragraph.strip():
+                    introduction_html += f"<p>{paragraph}</p>\n"
+            
+            if not introduction_html:
+                introduction_html = f"<p>{introduction_text}</p>"
+            
+            html_content.append(introduction_html)
+            
+            # Create table of contents
+            toc_html = '<div class="table-of-contents">\n<h3>Table of Contents</h3>\n<ul>\n'
+            
+            for i, section in enumerate(blog_structure["sections"]):
+                section_id = f"section-{i+1}"
+                toc_html += f'<li><a href="#{section_id}">{section["heading"]}</a></li>\n'
+            
+            toc_html += '</ul>\n</div>\n'
+            html_content.append(toc_html)
+            
+            # Generate content for each section
+            for i, section in enumerate(blog_structure["sections"]):
+                section_id = f"section-{i+1}"
+                
+                # Generate section content based on the themes and structure, allowing for more original content
+                section_prompt = f"""
+                Create detailed, original content for this blog section. Use the video as context but create content that goes beyond just repeating what was said.
+                
+                Blog Topic: {blog_structure['title']}
+                Section: {section['heading']}
+                Objective: {section.get('objective', 'Provide valuable insights on this topic')}
+                Key Concepts: {', '.join(section.get('key_concepts', []))}
+                
+                Video Context:
+                - Title: {video_info['title']}
+                - Author: {video_info['author']}
+                - Key Themes: {themes_text[:500]}
+                
+                Write comprehensive content (700-900 words) for this section that:
+                1. Starts with the H2 heading: "{section['heading']}"
+                2. Provides original insights and perspectives on the key concepts
+                3. Uses examples, analogies, or case studies to illustrate points
+                4. Includes practical applications and real-world relevance
+                5. Demonstrates deep understanding of the subject matter
+                6. Speaks directly to the reader in an engaging, conversational tone
+                
+                For each subsection:
+                - Add the H3 heading
+                - Develop the focus points with original analysis
+                - Include actionable takeaways or insights
+                
+                Include these HTML elements:
+                - Use <blockquote> for an insightful quote or key principle
+                - Add a <div class="tip-box"> with practical advice
+                - Include a <div class="highlight"> for an important concept
+                - Add <!-- IMAGE: "detailed, specific image description related to {section['heading']}" --> at an appropriate spot
+                
+                The content should be valuable to readers even if they never watch the video. Focus on creating high-quality, original content that uses the video's themes as a foundation but isn't constrained by its exact structure.
+                
+                Format as clean HTML with proper paragraph tags.
+                """
+                
+                section_response = self.llm.invoke(
+                    [{"role": "system", "content": "You are an expert content creator who generates original, insightful blog content that goes beyond source material to provide unique value."},
+                     {"role": "user", "content": section_prompt}],
+                    temperature=0.7
+                )
+                
+                section_content = section_response.content if hasattr(section_response, 'content') else str(section_response)
+                
+                # Clean up any markdown formatting
+                section_content = re.sub(r'```html\s*|\s*```', '', section_content)
+                
+                # Ensure the section has proper HTML structure
+                if not section_content.strip().startswith('<h2'):
+                    section_content = f'<h2 id="{section_id}">{section["heading"]}</h2>\n{section_content}'
+                else:
+                    section_content = re.sub(r'<h2[^>]*>', f'<h2 id="{section_id}">', section_content, 1)
+                
+                html_content.append(f'<section id="{section_id}">\n{section_content}\n</section>')
+            
+            # Generate a section on practical applications if available in the structure
+            if "practical_applications" in blog_structure and blog_structure["practical_applications"]:
+                applications_prompt = f"""
+                Create a practical applications section (400-500 words) for this blog based on these key points:
+                
+                Blog Topic: {blog_structure['title']}
+                
+                Applications to Cover:
+                {', '.join(blog_structure['practical_applications'])}
+                
+                Video Context:
+                - Title: {video_info['title']}
+                - Key Themes: {themes_text[:300]}
+                
+                Write a practical section that:
+                1. Starts with an H2 heading "Practical Applications"
+                2. Provides actionable advice for implementing these concepts
+                3. Includes real-world examples or scenarios
+                4. Addresses potential challenges and how to overcome them
+                5. Helps readers see how they can apply these ideas immediately
+                
+                Format as clean HTML with proper paragraph tags.
+                """
+                
+                applications_response = self.llm.invoke(
+                    [{"role": "system", "content": "You are an expert at creating practical, actionable content that helps readers apply concepts in real-world scenarios."},
+                     {"role": "user", "content": applications_prompt}],
+                    temperature=0.6
+                )
+                
+                applications_content = applications_response.content if hasattr(applications_response, 'content') else str(applications_response)
+                applications_content = re.sub(r'```html\s*|\s*```', '', applications_content)
+                
+                if not applications_content.strip().startswith('<h2'):
+                    applications_content = f'<h2 id="applications">Practical Applications</h2>\n{applications_content}'
+                
+                html_content.append(f'<section id="applications">\n{applications_content}\n</section>')
+            
+            # Generate conclusion
+            conclusion_prompt = f"""
+            Create an insightful conclusion (300-400 words) for this blog post.
+            
+            Blog Title: {blog_structure['title']}
+            Key Themes: {themes_text[:300]}
+            
+            Write a conclusion that:
+            1. Synthesizes the key insights from the blog in an original way
+            2. Highlights the broader significance of these concepts
+            3. Offers forward-looking perspectives or future implications
+            4. Ends with a thought-provoking question or call-to-action
+            5. Inspires readers to apply what they've learned
+            
+            The conclusion should provide value beyond just summarizing the content. It should leave readers with new insights or perspectives.
+            
+            Format as HTML with proper paragraph tags.
+            """
+            
+            conclusion_response = self.llm.invoke(
+                [{"role": "system", "content": "You are an expert at creating powerful conclusions that synthesize ideas and inspire action."},
+                 {"role": "user", "content": conclusion_prompt}],
+                temperature=0.7
+            )
+            
+            conclusion_content = conclusion_response.content if hasattr(conclusion_response, 'content') else str(conclusion_response)
+            conclusion_content = re.sub(r'```html\s*|\s*```', '', conclusion_content)
+            
+            if not conclusion_content.strip().startswith('<h2'):
+                conclusion_content = f'<h2 id="conclusion">Conclusion</h2>\n{conclusion_content}'
+            
+            html_content.append(f'<section id="conclusion">\n{conclusion_content}\n</section>')
+            
+            # Add source attribution in a more subtle way
+            source_section = f"""
+            <section id="inspiration">
+                <h3>Inspiration for this Article</h3>
+                <p>This blog post was inspired by concepts discussed in the YouTube video <strong>"{video_info['title']}"</strong> by <strong>{video_info['author']}</strong>. 
+                While we've expanded on these ideas with original analysis and additional perspectives, we recommend checking out the original 
+                video for another valuable take on this subject.</p>
+            </section>
+            """
+            html_content.append(source_section)
+            
+            # Combine all content
+            full_content = '\n'.join(html_content)
+            
+            # Extract image queries from the content
+            image_markers = re.findall(r'<!-- IMAGE: "(.*?)" -->', full_content)
+            
+            # Add image concepts from structure
+            image_concepts = blog_structure.get("image_concepts", [])
+            
+            # Combine and ensure we have highly specific image queries
+            all_image_queries = image_markers + image_concepts
+            improved_image_queries = []
+            topic_keywords = ' '.join(blog_structure['title'].split()[:3])  # Use blog title for more relevant images
+            
+            for query in all_image_queries:
+                # Create a more focused, relevant query
+                if len(query.split()) < 3:
+                    # Too generic, make it more specific
+                    improved_query = f"{topic_keywords} {query} concept visualization"
+                else:
+                    improved_query = query
+                    
+                # Add descriptive visual terms if not present
+                if not any(term in improved_query.lower() for term in ['diagram', 'illustration', 'infographic', 'chart', 'example']):
+                    improved_query += " professional illustration"
+                    
+                improved_image_queries.append(improved_query)
+            
+            # Add more image queries if needed
+            while len(improved_image_queries) < min(8, len(blog_structure["sections"]) + 2):
+                section_index = len(improved_image_queries) % len(blog_structure["sections"])
+                section = blog_structure["sections"][section_index]
+                
+                if "key_concepts" in section and section["key_concepts"]:
+                    concept = section["key_concepts"][0]
+                    query = f"{concept} {section['heading']} visualization"
+                else:
+                    query = f"{section['heading']} concept illustration"
+                    
+                improved_image_queries.append(query)
+            
+            # Process images with more specific queries
+            content_with_images = self._process_image_markers(full_content, improved_image_queries)
+            
+            # Create the final blog data
+            blog_data = {
+                "title": blog_structure["title"],
+                "meta_description": blog_structure["meta_description"],
+                "content": content_with_images
             }
             
-            logger.info(f"Successfully extracted content from video: {video_info['title']}")
-            return video_info
+            # Add schema markup
+            blog_data["content"] = self.add_schema_markup(
+                blog_data["content"],
+                blog_data["title"],
+                blog_data["meta_description"],
+                video_info
+            )
             
+            # Format with HTML template
+            html_content = self.generate_html(blog_data)
+            
+            logger.info("Blog post generation completed successfully")
+            return {
+                "title": blog_data["title"],
+                "meta_description": blog_data["meta_description"],
+                "content": html_content
+            }
+        
         except Exception as e:
-            logger.error(f"Error extracting video content: {str(e)}")
+            logger.error(f"Error generating blog post: {str(e)}")
+            return {
+                "title": video_info["title"],
+                "meta_description": f"An exploration of ideas related to {video_info['title']}",
+                "content": f"<h1>{video_info['title']}</h1>\n\n<p>Error generating blog content: {str(e)}</p>"
+            }
+
+    def _process_image_markers(self, content: str, image_queries: List[str]) -> str:
+        """
+        Process image markers in content and replace with topic-relevant images.
+        
+        Args:
+            content: HTML content with image markers
+            image_queries: List of image search queries
+            
+        Returns:
+            HTML content with actual images
+        """
+        logger.info(f"Processing {len(image_queries)} image queries")
+        
+        # Create image searcher if not already available
+        if not hasattr(self, 'image_searcher'):
+            self.image_searcher = ImageSearcher()
+        
+        # Process each query
+        for i, query in enumerate(image_queries):
             try:
-                # Fallback to YoutubeLoader
-                loader = YoutubeLoader.from_youtube_url(
-                    url, 
-                    add_video_info=True,
-                    language=["en", "en-US"]
-                )
-                documents = loader.load()
+                # Make sure query is specific and relevant
+                if len(query.split()) < 3:
+                    # Too generic, make it more specific
+                    query = f"detailed diagram of {query} concept"
                 
-                video_info = {
-                    "title": documents[0].metadata.get("title", "Untitled Video"),
-                    "author": documents[0].metadata.get("author", "Unknown"),
-                    "publish_date": documents[0].metadata.get("publish_date", "Unknown"),
-                    "description": documents[0].metadata.get("description", ""),
-                    "view_count": documents[0].metadata.get("view_count", 0),
-                    "thumbnail_url": documents[0].metadata.get("thumbnail_url", ""),
-                    "transcript": documents[0].page_content
+                # Search for images
+                image_results = self.image_searcher.search_images(query, num_images=1)
+                    
+                if image_results and len(image_results) > 0:
+                    image = image_results[0]
+                    
+                    # Verify image URL
+                    if not image['url'].startswith(('http://', 'https://')):
+                        # Use placeholder instead
+                        image['url'] = f"https://placehold.co/800x400/3498db/FFFFFF/png?text={query.replace(' ', '+')}"
+                        image['source'] = "Placeholder Image"
+                    
+                    # Create HTML for the image
+                    img_html = f"""
+                    <figure class="blog-image">
+                        <img src="{image['url']}" 
+                            alt="{image['title'] or query}"
+                            loading="lazy">
+                        <figcaption>{image['title'] or query} 
+                        <br><small>(Source: {image['source']})</small></figcaption>
+                    </figure>
+                    """
+                    
+                    # Find the appropriate marker to replace
+                    marker_found = False
+                    for marker in [f'<!-- IMAGE: "{query}" -->', '<!-- IMAGE PLACEHOLDER -->']:
+                        if marker in content:
+                            content = content.replace(marker, img_html, 1)
+                            marker_found = True
+                            break
+                    
+                    # If no marker found, try to find any image marker
+                    if not marker_found:
+                        marker_pattern = r'<!-- IMAGE: ".*?" -->'
+                        match = re.search(marker_pattern, content)
+                        if match:
+                            content = content.replace(match.group(0), img_html, 1)
+                        else:
+                            # Add image at the end of an appropriate section
+                            sections = re.findall(r'(<section id=".*?">.*?</section>)', content, re.DOTALL)
+                            if i < len(sections):
+                                section = sections[i]
+                                section_with_image = section.replace('</section>', f'{img_html}</section>')
+                                content = content.replace(section, section_with_image)
+                else:
+                    logger.warning(f"No images found for query: {query}")
+                    
+                    # Add a placeholder image with the query text
+                    placeholder_html = f"""
+                    <figure class="blog-image">
+                        <img src="https://placehold.co/800x400/3498db/FFFFFF/png?text={query.replace(' ', '+')}" 
+                            alt="{query}"
+                            loading="lazy">
+                        <figcaption>{query} <br><small>(Placeholder Image)</small></figcaption>
+                    </figure>
+                    """
+                    
+                    # Find any image marker to replace
+                    marker_pattern = r'<!-- IMAGE: ".*?" -->'
+                    match = re.search(marker_pattern, content)
+                    if match:
+                        content = content.replace(match.group(0), placeholder_html, 1)
+                
+            except Exception as e:
+                logger.error(f"Error processing image query '{query}': {str(e)}")
+        
+        return content
+
+    def add_schema_markup(self, content: str, title: str, meta_description: str, video_info: Dict[str, Any]) -> str:
+        """
+        Add schema.org markup for SEO with video information.
+        
+        Args:
+            content: HTML content
+            title: Blog title
+            meta_description: Meta description
+            video_info: Dictionary with video information
+            
+        Returns:
+            Enhanced HTML with schema markup
+        """
+        # Generate a more detailed schema that includes video data
+        schema = {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": title,
+            "description": meta_description,
+            "image": video_info.get("thumbnail_url", ""),
+            "datePublished": datetime.now().strftime("%Y-%m-%d"),
+            "author": {
+                "@type": "Person",
+                "name": "YouTube Blog Generator"
+            },
+            "publisher": {
+                "@type": "Organization",
+                "name": "YouTube Blog Generator",
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": "https://example.com/logo.png"  # Replace with actual logo
                 }
+            },
+            "mainEntityOfPage": {
+                "@type": "WebPage",
+                "@id": "https://example.com/blog/" + datetime.now().strftime("%Y%m%d")  # Replace with actual URL
+            },
+            "about": {
+                "@type": "Thing",
+                "name": video_info.get("title", "")
+            },
+            "video": {
+                "@type": "VideoObject",
+                "name": video_info.get("title", ""),
+                "description": video_info.get("description", ""),
+                "thumbnailUrl": video_info.get("thumbnail_url", ""),
+                "uploadDate": video_info.get("publish_date", datetime.now().strftime("%Y-%m-%d")),
+                "publisher": {
+                    "@type": "Organization",
+                    "name": video_info.get("author", "")
+                }
+            }
+        }
+        
+        schema_script = f'<script type="application/ld+json">{json.dumps(schema)}</script>\n\n'
+        
+        # Add table of contents if not already present
+        if '<div class="table-of-contents">' not in content:
+            toc = '<div class="table-of-contents">\n<h3>Table of Contents</h3>\n<ul>\n'
+            
+            headings = re.findall(r'<h2[^>]*>(.*?)</h2>', content)
+            for i, heading in enumerate(headings):
+                anchor_id = f"section-{i+1}"
+                content = content.replace(
+                    f'<h2>{heading}</h2>',
+                    f'<h2 id="{anchor_id}">{heading}</h2>',
+                    1
+                )
+                toc += f'<li><a href="#{anchor_id}">{heading}</a></li>\n'
+            
+            toc += '</ul>\n</div>\n\n'
+            
+            first_para_end = content.find('</p>')
+            first_h1_end = content.find('</h1>')
+            
+            insert_pos = max(first_para_end, first_h1_end)
+            if insert_pos > 0:
+                insert_pos += 4
+                enhanced_content = content[:insert_pos] + '\n\n' + toc + content[insert_pos:]
+            else:
+                enhanced_content = toc + content
+        else:
+            enhanced_content = content
+        
+        # Ensure all sections are properly wrapped in section tags
+        if '<section' not in enhanced_content:
+            # Find all h2 headings
+            h2_pattern = r'<h2[^>]*>.*?</h2>'
+            h2_matches = list(re.finditer(h2_pattern, enhanced_content))
+            
+            # Wrap content between h2 tags in section elements
+            for i in range(len(h2_matches)):
+                start = h2_matches[i].start()
+                end = h2_matches[i+1].start() if i < len(h2_matches) - 1 else len(enhanced_content)
+                section_id = f"section-{i+1}"
                 
-                logger.info(f"Successfully extracted content using fallback method: {video_info['title']}")
-                return video_info
+                section_content = enhanced_content[start:end]
+                section_wrapped = f'<section id="{section_id}">\n{section_content}\n</section>'
                 
-            except Exception as e2:
-                logger.error(f"Both extraction methods failed: {str(e2)}")
-                raise Exception(f"Failed to extract video content using both methods. Primary error: {str(e)}, Fallback error: {str(e2)}")
-    
+                enhanced_content = enhanced_content[:start] + section_wrapped + enhanced_content[end:]
+        
+        return schema_script + enhanced_content
+
+    def generate_html(self, blog_data: Dict[str, str]) -> str:
+        """
+        Generate HTML from blog data with professional styling.
+        
+        Args:
+            blog_data: Dictionary with blog data
+            
+        Returns:
+            HTML content
+        """
+        html_template = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="description" content="{meta_description}">
+            <title>{title}</title>
+            <style>
+                :root {{
+                    --primary-color: #2c3e50;
+                    --secondary-color: #3498db;
+                    --accent-color: #e74c3c;
+                    --light-bg: #f8f9fa;
+                    --dark-bg: #2c3e50;
+                    --text-color: #333;
+                    --light-text: #f8f9fa;
+                    --border-radius: 5px;
+                    --box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                }}
+                
+                * {{
+                    box-sizing: border-box;
+                    margin: 0;
+                    padding: 0;
+                }}
+                
+                body {{
+                    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+                    line-height: 1.7;
+                    color: var(--text-color);
+                    background-color: #fff;
+                    max-width: 850px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                
+                /* Typography */
+                h1, h2, h3, h4, h5, h6 {{
+                    margin-top: 1.5em;
+                    margin-bottom: 0.8em;
+                    line-height: 1.3;
+                    color: var(--primary-color);
+                    font-weight: 700;
+                }}
+                
+                h1 {{
+                    font-size: 2.5rem;
+                    text-align: center;
+                    margin-top: 1em;
+                    color: var(--primary-color);
+                    border-bottom: 2px solid var(--secondary-color);
+                    padding-bottom: 0.5em;
+                }}
+                
+                h2 {{
+                    font-size: 1.8rem;
+                    border-bottom: 1px solid #eee;
+                    padding-bottom: 0.3em;
+                    margin-top: 2em;
+                }}
+                
+                h3 {{
+                    font-size: 1.4rem;
+                    color: var(--secondary-color);
+                }}
+                
+                p {{
+                    margin-bottom: 1.5em;
+                    font-size: 1.1rem;
+                }}
+                
+                a {{
+                    color: var(--secondary-color);
+                    text-decoration: none;
+                    transition: color 0.2s;
+                    border-bottom: 1px dotted var(--secondary-color);
+                }}
+                
+                a:hover {{
+                    color: var(--accent-color);
+                    border-bottom: 1px solid var(--accent-color);
+                }}
+                
+                /* Blog Structure */
+                .table-of-contents {{
+                    background-color: var(--light-bg);
+                    padding: 1.5em;
+                    border-radius: var(--border-radius);
+                    margin: 2em 0;
+                    box-shadow: var(--box-shadow);
+                }}
+                
+                .table-of-contents h3 {{
+                    margin-top: 0;
+                    margin-bottom: 1em;
+                    text-align: center;
+                }}
+                
+                .table-of-contents ul {{
+                    list-style-type: none;
+                    padding-left: 0;
+                }}
+                
+                .table-of-contents ul li {{
+                    margin-bottom: 0.7em;
+                    padding-left: 1.5em;
+                    position: relative;
+                }}
+                
+                .table-of-contents ul li::before {{
+                    content: "→";
+                    position: absolute;
+                    left: 0;
+                    color: var(--secondary-color);
+                }}
+                
+                /* Content Elements */
+                blockquote {{
+                    border-left: 4px solid var(--secondary-color);
+                    padding: 1em 1.5em;
+                    margin: 1.5em 0;
+                    background-color: rgba(52, 152, 219, 0.1);
+                    border-radius: 0 var(--border-radius) var(--border-radius) 0;
+                    font-style: italic;
+                }}
+                
+                blockquote p:last-child {{
+                    margin-bottom: 0;
+                }}
+                
+                .tip-box {{
+                    background-color: rgba(46, 204, 113, 0.1);
+                    border-left: 4px solid #2ecc71;
+                    padding: 1.5em;
+                    margin: 1.5em 0;
+                    border-radius: 0 var(--border-radius) var(--border-radius) 0;
+                }}
+                
+                .tip-box::before {{
+                    content: "💡 Tip";
+                    display: block;
+                    font-weight: bold;
+                    margin-bottom: 0.5em;
+                    color: #27ae60;
+                }}
+                
+                .highlight {{
+                    background-color: rgba(241, 196, 15, 0.1);
+                    border-left: 4px solid #f1c40f;
+                    padding: 1.5em;
+                    margin: 1.5em 0;
+                    border-radius: 0 var(--border-radius) var(--border-radius) 0;
+                }}
+                
+                .highlight::before {{
+                    content: "🔑 Key Point";
+                    display: block;
+                    font-weight: bold;
+                    margin-bottom: 0.5em;
+                    color: #f39c12;
+                }}
+                
+                /* Code blocks */
+                code {{
+                    background-color: #f5f5f5;
+                    padding: 0.2em 0.4em;
+                    border-radius: 3px;
+                    font-family: Consolas, Monaco, 'Andale Mono', monospace;
+                    font-size: 0.9em;
+                }}
+                
+                pre {{
+                    background-color: #f5f5f5;
+                    padding: 1em;
+                    border-radius: var(--border-radius);
+                    overflow-x: auto;
+                    margin: 1.5em 0;
+                }}
+                
+                pre code {{
+                    background-color: transparent;
+                    padding: 0;
+                }}
+                
+                /* Images */
+                .blog-image {{
+                    margin: 2em 0;
+                    text-align: center;
+                }}
+                
+                .blog-image img {{
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: var(--border-radius);
+                    box-shadow: var(--box-shadow);
+                }}
+                
+                figcaption {{
+                    margin-top: 0.8em;
+                    font-size: 0.9em;
+                    color: #777;
+                }}
+                
+                /* Lists */
+                ul, ol {{
+                    margin: 1em 0 1.5em 2em;
+                }}
+                
+                li {{
+                    margin-bottom: 0.5em;
+                }}
+                
+                /* Table */
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 2em 0;
+                }}
+                
+                th, td {{
+                    padding: 0.75em;
+                    border: 1px solid #ddd;
+                }}
+            </style>
+        </head>
+        <body>
+            <article itemscope itemtype="https://schema.org/Article">
+                <meta itemprop="headline" content="{title}">
+                <meta itemprop="description" content="{meta_description}">
+                <meta itemprop="datePublished" content="{date}">
+                
+                {content}
+                
+                <footer>
+                    <p>This blog was generated based on a YouTube video. All content is directly derived from the video.</p>
+                    <p>Generated on {date}</p>
+                </footer>
+            </article>
+        </body>
+        </html>
+        """
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        html_content = html_template.format(
+            title=blog_data['title'],
+            meta_description=blog_data['meta_description'],
+            content=blog_data['content'],
+            date=today
+        )
+        
+        return html_content
+
     def summarize_transcript(self, transcript: str) -> str:
         """
-        Generate a concise summary of the video transcript.
+        Generate a factual summary of the video transcript.
         
         Args:
             transcript: Video transcript text
@@ -150,17 +1219,27 @@ class YouTubeBlogGenerator:
                 chunk_overlap=400
             )
             texts = text_splitter.split_text(transcript)
-            docs = [Document(page_content=t) for t in texts]
             
-            # Create summarization chain
-            chain = load_summarize_chain(
-                self.llm, 
-                chain_type="map_reduce",
-                verbose=False
-            )
+            # Use direct summarization approach to maintain factuality
+            summary_messages = [
+                {"role": "system", "content": """You are an expert at creating factual, comprehensive summaries of video transcripts.
+                Your job is to extract the key points, main arguments, and important details from the transcript WITHOUT adding any 
+                information not present in the text. Focus ONLY on what is explicitly stated, not on interpretations or additions.
+                NEVER include information not directly stated in the transcript."""},
+                {"role": "user", "content": f"""Create a detailed, factual summary of this video transcript. 
+                Focus only on what is explicitly stated in the transcript. Include:
+                1. Main topics and concepts explained
+                2. Key definitions and explanations provided
+                3. Examples used by the speaker
+                4. Conclusions or calls to action mentioned
+                
+                Transcript:
+                {transcript[:15000]}"""}
+            ]
             
-            # Generate summary
-            summary = chain.run(docs)
+            summary_response = self.llm.invoke(summary_messages, temperature=0.3)
+            summary = summary_response.content if hasattr(summary_response, 'content') else str(summary_response)
+            
             logger.info("Transcript summarization completed")
             return summary
             
@@ -168,224 +1247,7 @@ class YouTubeBlogGenerator:
             logger.error(f"Error summarizing transcript: {str(e)}")
             # Return a portion of the transcript if summarization fails
             return transcript[:2000] + "..."
-    
-    def analyze_video_content(self, video_info: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Analyze video content to extract key topics, themes, and insights.
-        
-        Args:
-            video_info: Dictionary with video metadata and transcript
-            
-        Returns:
-            Dictionary with analysis results
-        """
-        logger.info("Analyzing video content")
-        
-        try:
-            # Create analysis prompt
-            analysis_prompt = PromptTemplate(
-                input_variables=["title", "transcript"],
-                template="""
-                Analyze this YouTube video content and identify:
-                1. Main topics and themes
-                2. Key points and insights
-                3. Supporting examples or data
-                4. Technical concepts explained
-                5. Practical applications discussed
-                6. Natural content segments
-                7. Important quotes or statements
-                8. Industry trends mentioned
-                9. Expert opinions or citations
-                10. Action items or takeaways
 
-                Video Title: {title}
-
-                Transcript:
-                {transcript}
-
-                Provide a detailed analysis in JSON format with these sections.
-                """
-            )
-            
-            # Create analysis chain
-            analysis_chain = LLMChain(
-                llm=self.llm,
-                prompt=analysis_prompt,
-                verbose=False
-            )
-            
-            # Generate analysis
-            analysis_result = analysis_chain.run(
-                title=video_info["title"],
-                transcript=video_info["transcript"][:10000]  # Use first 10k chars for analysis
-            )
-            
-            # Try to parse JSON response
-            try:
-                # Extract JSON if it's embedded in text
-                json_match = re.search(r'```json\s*(.*?)\s*```', analysis_result, re.DOTALL)
-                if json_match:
-                    analysis_result = json_match.group(1)
-                
-                # Clean up any non-JSON text
-                json_start = analysis_result.find('{')
-                json_end = analysis_result.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    analysis_result = analysis_result[json_start:json_end]
-                
-                analysis_data = json.loads(analysis_result)
-                logger.info("Successfully parsed analysis JSON")
-            except json.JSONDecodeError:
-                # If JSON parsing fails, return the raw text
-                logger.warning("Failed to parse analysis as JSON, using raw text")
-                analysis_data = {"raw_analysis": analysis_result}
-            
-            return analysis_data
-            
-        except Exception as e:
-            logger.error(f"Error analyzing video content: {str(e)}")
-            return {"error": str(e)}
-    
-    def generate_blog_post(self, video_info: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Generate a high-quality blog post based on video content and analysis.
-        
-        Args:
-            video_info: Dictionary with video metadata and transcript
-            analysis: Dictionary with content analysis
-            
-        Returns:
-            Dictionary with blog title, meta description, and content
-        """
-        logger.info("Generating blog post")
-        
-        try:
-            # Create blog generation prompt
-            blog_prompt = PromptTemplate(
-                input_variables=["title", "transcript", "analysis", "summary"],
-                template="""
-                You are an expert content writer specializing in creating comprehensive, SEO-optimized blog posts from YouTube videos.
-                
-                Create a high-quality, engaging blog post based on this YouTube video content.
-                
-                Video Title: {title}
-                
-                Video Summary:
-                {summary}
-                
-                Content Analysis:
-                {analysis}
-                
-                Full Transcript:
-                {transcript}
-                
-                Requirements:
-                
-                1. Content Structure:
-                   - Create an SEO-optimized headline that captures the main topic
-                   - Write a compelling introduction (2-3 paragraphs) that hooks the reader
-                   - Include an executive summary (300-500 words)
-                   - Create a clear table of contents
-                   - Organize content into 5-7 logical sections based on the video's flow
-                   - Add descriptive subheadings for each section
-                   - Include a strong conclusion with actionable takeaways
-                   - End with a compelling call to action
-                
-                2. Content Enhancement:
-                   - Integrate direct quotes from the video for authenticity
-                   - Add relevant industry statistics and data points
-                   - Include expert insights from the video
-                   - Provide practical examples and case studies
-                   - Add implementation tips and best practices
-                   - Address common questions and challenges
-                   - Include future implications and trends
-                
-                3. SEO Optimization:
-                   - Use semantic keywords naturally
-                   - Optimize header hierarchy (H1, H2, H3)
-                   - Include internal linking suggestions
-                   - Add meta description
-                   - Use LSI keywords
-                   - Optimize for featured snippets
-                   - Include a meta description (150-160 characters)
-                
-                4. Engagement Elements:
-                   - Add thought-provoking questions throughout
-                   - Include highlighted key quotes
-                   - Use bullet points for lists and takeaways
-                   - Create info boxes for important concepts
-                   - Add "Tweet This" quotes
-                   - Include expert tips boxes
-                   - Use examples and analogies for complex concepts
-                
-                Format the response as a JSON object with:
-                {{
-                    "title": "SEO-optimized title",
-                    "meta_description": "Compelling 150-160 character description",
-                    "content": "Full HTML blog content"
-                }}
-                
-                Make the content comprehensive, engaging, and highly valuable to readers.
-                Focus on maintaining the speaker's voice while adding professional polish.
-                """
-            )
-            
-            # Create summary if not already available
-            summary = self.summarize_transcript(video_info["transcript"]) if "summary" not in video_info else video_info["summary"]
-            
-            # Create blog generation chain
-            blog_chain = LLMChain(
-                llm=self.llm,
-                prompt=blog_prompt,
-                verbose=False
-            )
-            
-            # Generate blog post
-            blog_result = blog_chain.run(
-                title=video_info["title"],
-                transcript=video_info["transcript"][:15000],  # Use first 15k chars of transcript
-                analysis=json.dumps(analysis, indent=2),
-                summary=summary
-            )
-            
-            # Try to parse JSON response
-            try:
-                # Extract JSON if it's embedded in text
-                json_match = re.search(r'```json\s*(.*?)\s*```', blog_result, re.DOTALL)
-                if json_match:
-                    blog_result = json_match.group(1)
-                
-                # Clean up any non-JSON text
-                json_start = blog_result.find('{')
-                json_end = blog_result.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    blog_result = blog_result[json_start:json_end]
-                
-                blog_data = json.loads(blog_result)
-                logger.info("Successfully parsed blog JSON")
-            except json.JSONDecodeError:
-                # If JSON parsing fails, extract content manually
-                logger.warning("Failed to parse blog as JSON, extracting content manually")
-                blog_data = self.extract_blog_content(blog_result)
-            
-            # Add schema markup
-            blog_data["content"] = self.add_schema_markup(
-                blog_data["content"],
-                blog_data["title"],
-                blog_data["meta_description"]
-            )
-            
-            logger.info("Blog post generation completed")
-            return blog_data
-            
-        except Exception as e:
-            logger.error(f"Error generating blog post: {str(e)}")
-            return {
-                "title": video_info["title"],
-                "meta_description": "Analysis of video content",
-                "content": f"<h1>{video_info['title']}</h1>\n\n<p>Error generating blog content: {str(e)}</p>"
-            }
-    
     def extract_blog_content(self, content: str) -> Dict[str, str]:
         """
         Extract blog content from LLM response when JSON parsing fails.
@@ -431,403 +1293,104 @@ class YouTubeBlogGenerator:
                 "meta_description": "Analysis of video content",
                 "content": content
             }
-    
-    def add_schema_markup(self, content: str, title: str, meta_description: str) -> str:
-        """
-        Add schema.org markup for SEO.
-        
-        Args:
-            content: HTML content
-            title: Blog title
-            meta_description: Meta description
-            
-        Returns:
-            Enhanced HTML with schema markup
-        """
-        schema = {
-            "@context": "https://schema.org",
-            "@type": "Article",
-            "headline": title,
-            "description": meta_description,
-            "datePublished": datetime.now().strftime("%Y-%m-%d"),
-            "author": {
-                "@type": "Person",
-                "name": "YouTube Blog Generator"
-            }
-        }
-        
-        schema_script = f'<script type="application/ld+json">{json.dumps(schema)}</script>\n\n'
-        
-        # Add table of contents
-        toc = '<div class="table-of-contents">\n<h3>Table of Contents</h3>\n<ul>\n'
-        
-        headings = re.findall(r'<h2[^>]*>(.*?)</h2>', content)
-        for i, heading in enumerate(headings):
-            anchor_id = f"section-{i+1}"
-            content = content.replace(
-                f'<h2>{heading}</h2>',
-                f'<h2 id="{anchor_id}">{heading}</h2>',
-                1
-            )
-            toc += f'<li><a href="#{anchor_id}">{heading}</a></li>\n'
-        
-        toc += '</ul>\n</div>\n\n'
-        
-        first_para_end = content.find('</p>')
-        first_h1_end = content.find('</h1>')
-        
-        insert_pos = max(first_para_end, first_h1_end)
-        if insert_pos > 0:
-            insert_pos += 4
-            enhanced_content = content[:insert_pos] + '\n\n' + toc + content[insert_pos:]
-        else:
-            enhanced_content = toc + content
-        
-        return schema_script + enhanced_content
-    
-    def generate_html(self, blog_data: Dict[str, str]) -> str:
-        """
-        Generate HTML from blog data.
-        
-        Args:
-            blog_data: Dictionary with blog data
-            
-        Returns:
-            HTML content
-        """
-        html_template = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="description" content="{meta_description}">
-            <title>{title}</title>
-            <style>
-                body {{ font-family: 'Segoe UI', sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }}
-                h1 {{ color: #2c3e50; margin-bottom: 20px; }}
-                h2 {{ color: #34495e; margin-top: 30px; margin-bottom: 15px; }}
-                h3 {{ color: #7f8c8d; margin-top: 25px; }}
-                p {{ margin-bottom: 15px; }}
-                .table-of-contents {{ background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; }}
-                .table-of-contents ul {{ padding-left: 20px; }}
-                .table-of-contents h3 {{ margin-top: 0; }}
-                blockquote {{ border-left: 4px solid #ccc; padding-left: 15px; margin-left: 0; color: #555; }}
-                code {{ background-color: #f0f0f0; padding: 2px 4px; border-radius: 3px; }}
-                pre {{ background-color: #f0f0f0; padding: 10px; border-radius: 5px; overflow-x: auto; }}
-                ul, ol {{ padding-left: 25px; margin-bottom: 15px; }}
-                .highlight {{ background-color: #ffffd0; padding: 10px; border-radius: 5px; margin: 15px 0; }}
-                .tip-box {{ background-color: #e1f5fe; padding: 15px; border-radius: 5px; margin: 15px 0; }}
-                .tweet-this {{ background-color: #e8f5e9; padding: 15px; border-radius: 5px; margin: 15px 0; }}
-            </style>
-        </head>
-        <body>
-            {content}
-        </body>
-        </html>
-        """
-        
-        html_content = html_template.format(
-            title=blog_data['title'],
-            content=blog_data['content'],
-            meta_description=blog_data['meta_description']
-        )
-        
-        return html_content
-    
-    def process_youtube_url(self, url: str) -> Dict[str, Any]:
-        """
-        Process a YouTube URL to generate a blog post.
-        
-        Args:
-            url: YouTube video URL
-            
-        Returns:
-            Dictionary with blog data and HTML content
-        """
-        logger.info(f"Processing YouTube URL: {url}")
-        
-        # Extract video content
-        video_info = self.extract_video_content(url)
-        
-        # Analyze video content
-        analysis = self.analyze_video_content(video_info)
-        
-        # Generate blog post
-        blog_data = self.generate_blog_post(video_info, analysis)
-        
-        # Generate HTML
-        html_content = self.generate_html(blog_data)
-        
-        return {
-            "video_info": video_info,
-            "analysis": analysis,
-            "blog_data": blog_data,
-            "html_content": html_content
-        }
 
-# Streamlit app
 def main():
-    # Set page configuration
+    """Streamlit app for blog generation"""
     st.set_page_config(
-        page_title="YouTube Blog Generator",
-        page_icon="📝",
-        layout="wide",
-        initial_sidebar_state="expanded"
+        page_title="AI Blog Generator",
+        page_icon="",
+        layout="wide"
     )
     
-    # Initialize session state for API key
-    if 'api_key_valid' not in st.session_state:
-        st.session_state.api_key_valid = False
-    if 'api_key' not in st.session_state:
-        st.session_state.api_key = ""
-    if 'processing' not in st.session_state:
-        st.session_state.processing = False
-    if 'result' not in st.session_state:
-        st.session_state.result = None
-    
-    # App header
-    st.title("📝 YouTube Blog Generator")
-    
+    st.title("📝 AI Blog Generator")
     st.markdown("""
-    Generate high-quality, SEO-optimized blog posts from YouTube videos.
-    
-    This tool uses AI to understand the video content and create comprehensive blog posts.
+    Transform YouTube videos into high-quality, engaging blog posts using GPT-4.
+    Our AI analyzes video content and creates comprehensive blog posts with relevant images.
     """)
     
-    # API key input section
-    st.header("🔑 API Key Authentication")
-    
-    with st.expander("Enter your Claude API Key", expanded=not st.session_state.api_key_valid):
-        api_key = st.text_input(
-            "Claude API Key",
+    # API key input
+    with st.sidebar:
+        st.header("🔑 API Keys")
+        
+        openai_api_key = st.text_input(
+            "OpenAI API Key", 
             type="password",
-            value=st.session_state.api_key,
-            help="Enter your Claude API key from Anthropic. Your key is not stored on our servers."
+            help="Enter your OpenAI API key"
         )
         
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            if st.button("Validate Key"):
-                if api_key:
-                    try:
-                        # Test the API key with a simple request
-                        test_llm = ChatAnthropic(
-                            model="claude-3-sonnet-20240229",
-                            anthropic_api_key=api_key,
-                            temperature=0.7,
-                            max_tokens=10
-                        )
-                        
-                        # Test the API key
-                        messages = [{"role": "user", "content": "Say 'valid' if you can read this."}]
-                        response = test_llm.invoke(messages)
-                        
-                        if response and 'valid' in response.content.lower():
-                            st.session_state.api_key = api_key
-                            st.session_state.api_key_valid = True
-                            st.success("✅ API key validated successfully!")
-                        else:
-                            st.session_state.api_key_valid = False
-                            st.error("❌ Invalid API key response")
-                            
-                    except Exception as e:
-                        st.session_state.api_key_valid = False
-                        st.error(f"❌ Invalid API key: {str(e)}")
-                else:
-                    st.session_state.api_key_valid = False
-                    st.error("❌ Please enter an API key")
-        
-        with col2:
-            st.markdown("""
-            **Don't have a Claude API key?** 
-            [Sign up for Anthropic Claude API access](https://www.anthropic.com/api)
-            """)
+        serp_api_key = st.text_input(
+            "SerpAPI Key (Optional)",
+            type="password",
+            help="Enter your SerpAPI key for image search"
+        )
     
-    # Main application - only show if API key is valid
-    if st.session_state.api_key_valid:
-        st.header("🎬 Generate Blog from YouTube Video")
-        
-        # YouTube URL input
-        url = st.text_input(
-            "YouTube Video URL",
-            placeholder="https://www.youtube.com/watch?v=...",
-            help="Enter the full URL of the YouTube video you want to convert to a blog post"
-        )
-        
-        # Blog style options
-        col1, col2 = st.columns(2)
-        with col1:
-            blog_style = st.selectbox(
-                "Blog Style",
-                ["Professional", "Casual", "Technical", "Educational"],
-                help="Select the writing style for your blog"
-            )
-        
-        with col2:
-            blog_length = st.selectbox(
-                "Blog Length",
-                ["Standard (1000-1500 words)", "Detailed (1500-2500 words)", "Comprehensive (2500+ words)"],
-                help="Select the desired length for your blog post"
-            )
-        
-        # Generate blog button
-        if st.button("Generate Blog", type="primary", disabled=st.session_state.processing):
-            if not url:
-                st.error("Please enter a YouTube URL")
-            else:
-                st.session_state.processing = True
-                
-                try:
-                    with st.spinner("Processing video content..."):
-                        # Initialize blog generator
-                        generator = YouTubeBlogGenerator(api_key=st.session_state.api_key)
-                        
-                        # Process YouTube URL
-                        result = generator.process_youtube_url(url)
-                        st.session_state.result = result
-                        
-                    st.session_state.processing = False
-                    st.success("✅ Blog generated successfully!")
-                    
-                except Exception as e:
-                    st.session_state.processing = False
-                    st.error(f"❌ An error occurred: {str(e)}")
-                    logger.error(f"Error in main app: {str(e)}", exc_info=True)
-        
-        # Display results if available
-        if st.session_state.result:
-            result = st.session_state.result
-            
-            # Create tabs for different views
-            tab1, tab2, tab3 = st.tabs(["Blog Preview", "Video Analysis", "Export Options"])
-            
-            with tab1:
-                st.subheader(result['blog_data']['title'])
-                st.markdown(f"*{result['blog_data']['meta_description']}*")
-                st.components.v1.html(result['html_content'], height=600, scrolling=True)
-            
-            with tab2:
-                st.subheader("Video Information")
-                st.write(f"**Title:** {result['video_info']['title']}")
-                st.write(f"**Author:** {result['video_info']['author']}")
-                st.write(f"**Published:** {result['video_info']['publish_date']}")
-                
-                # Display analysis if available
-                if 'main_topics' in result['analysis']:
-                    st.subheader("Main Topics")
-                    for topic in result['analysis'].get('main_topics', []):
-                        st.markdown(f"- {topic}")
-                
-                # Display transcript preview
-                st.subheader("Transcript Preview")
-                st.text_area(
-                    "Video Transcript (Preview)",
-                    result['video_info']['transcript'][:1000] + "...",
-                    height=200
-                )
-            
-            with tab3:
-                st.subheader("Download Options")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # HTML download
-                    st.download_button(
-                        label="Download as HTML",
-                        data=result['html_content'],
-                        file_name=f"blog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-                        mime="text/html",
-                        help="Download the blog post as an HTML file"
-                    )
-                
-                with col2:
-                    # JSON download
-                    blog_json = json.dumps({
-                        "title": result['blog_data']['title'],
-                        "meta_description": result['blog_data']['meta_description'],
-                        "content": result['blog_data']['content'],
-                        "video_info": {
-                            "title": result['video_info']['title'],
-                            "author": result['video_info']['author'],
-                            "publish_date": result['video_info']['publish_date'],
-                            "url": url
-                        }
-                    }, indent=2)
-                    
-                    st.download_button(
-                        label="Download as JSON",
-                        data=blog_json,
-                        file_name=f"blog_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json",
-                        help="Download the blog data as a JSON file"
-                    )
-                
-                # Markdown conversion option
-                st.subheader("Convert to Markdown")
-                if st.button("Generate Markdown"):
-                    # Convert HTML to Markdown
-                    try:
-                        import html2text
-                        h = html2text.HTML2Text()
-                        h.ignore_links = False
-                        h.ignore_images = False
-                        h.body_width = 0  # No wrapping
-                        
-                        markdown_content = h.handle(result['blog_data']['content'])
-                        
-                        st.download_button(
-                            label="Download Markdown",
-                            data=markdown_content,
-                            file_name=f"blog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                            mime="text/markdown"
-                        )
-                    except ImportError:
-                        st.error("html2text library not available. Please install it to enable Markdown conversion.")
-    else:
-        # Show message if API key is not validated
-        st.info("👆 Please enter and validate your Claude API key to use the application")
-        
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style="text-align: center; color: #888;">
-        YouTube Blog Generator | Powered by Claude AI | Created with Streamlit
-        </div>
-        """, 
-        unsafe_allow_html=True
+    # Main interface
+    url = st.text_input(
+        "YouTube Video URL",
+        placeholder="https://www.youtube.com/watch?v=..."
+    )
+    
+    # New options
+    blog_style = st.selectbox(
+        "Blog Style",
+        ["Professional", "Technical", "Educational"],
+        help="Select the writing style for your blog"
     )
 
-# Command-line interface
-def cli():
-    parser = argparse.ArgumentParser(description="Generate a blog post from a YouTube video")
-    parser.add_argument("url", help="YouTube video URL")
-    parser.add_argument("--output", "-o", help="Output file path (default: blog_output.html)")
-    parser.add_argument("--api-key", help="Claude API key (default: uses CLAUDE_API_KEY environment variable)")
-    args = parser.parse_args()
+    blog_length = st.selectbox(
+        "Content Length",
+        [
+            "Standard (2000-3000 words)",
+            "Detailed (3000-4000 words)",
+            "Comprehensive (4000+ words)"
+        ],
+        help="Select the desired length for your blog post"
+    )
     
-    try:
-        # Initialize blog generator
-        generator = YouTubeBlogGenerator(api_key=args.api_key)
+    if st.button("Generate Blog", type="primary"):
+        if not openai_api_key:
+            st.error("Please enter your OpenAI API key")
+            return
+            
+        if not url:
+            st.error("Please enter a YouTube URL")
+            return
         
-        # Process YouTube URL
-        result = generator.process_youtube_url(args.url)
+        try:
+            with st.spinner("Generating your blog post..."):
+                # Initialize generator
+                generator = YouTubeBlogGenerator(api_key=openai_api_key)
+                
+                # Extract video content
+                video_info = generator.extract_video_content(url)
+                
+                # Generate blog
+                blog = generator.generate_blog_post(
+                    video_info, 
+                    {
+                        "style": blog_style,
+                        "length": blog_length
+                    }
+                )
+                
+                # Display result
+                st.success("Blog generated successfully!")
+                
+                # Show blog preview
+                st.subheader("Blog Preview")
+                st.components.v1.html(blog["content"], height=800, scrolling=True)
+                
+                # Download options
+                st.download_button(
+                    "Download HTML",
+                    blog["content"],
+                    file_name=f"blog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                    mime="text/html"
+                )
         
-        # Save output
-        output_path = args.output or "blog_output.html"
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(result["html_content"])
-        
-        print(f"Blog post generated and saved to {output_path}")
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        logger.error(f"Error in CLI: {str(e)}", exc_info=True)
-        return 1
-    
-    return 0
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            logger.error(f"Error in main app: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
-    # Remove the environment variable check and just run the Streamlit app
     main()
