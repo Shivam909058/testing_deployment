@@ -226,7 +226,7 @@ class ImageSearcher:
     
     def _search_with_pexels(self, query: str, num_images: int) -> List[Dict[str, str]]:
         """Search images using Pexels API"""
-        pexels_api_key = "VxOT5bd3zF3uJXBXlFKKHO3EMFePX9rnm1DrHRvAW6kWlYKWhsCIVzDQ"
+        pexels_api_key = os.getenv("pexels_api_ke")
         if not pexels_api_key:
             return []
         
